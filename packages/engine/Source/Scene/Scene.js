@@ -163,17 +163,25 @@ function Scene(options) {
   this._webGPUCanvas = undefined;
   this._webGPUResizeObserver = undefined;
   if (options.useWebGPU !== false && isWebGPUSupported()) {
-    // Create the overlay canvas
+    // WebGPU is the sole visual renderer.  A new <canvas> is created for
+    // WebGPU rendering and placed above the WebGL canvas in the DOM.  The
+    // WebGL canvas is hidden immediately so users only see WebGPU output.
+    // The WebGL context still exists (a deep refactor would be needed to
+    // remove it entirely), but its render loop is a no-op while WebGPU is
+    // active.  The WebGPU canvas receives pointer-events (no
+    // `pointer-events:none`) so future mouse/touch camera interaction can be
+    // wired up directly to it.
+
+    // Hide the WebGL canvas immediately – the WebGPU canvas replaces it.
+    canvas.style.visibility = "hidden";
+
     const webgpuCanvas = document.createElement("canvas");
     webgpuCanvas.width = canvas.width;
     webgpuCanvas.height = canvas.height;
     webgpuCanvas.style.cssText =
-      "position:absolute;top:0;left:0;width:100%;height:100%;" +
-      "pointer-events:none;z-index:1;";
-    webgpuCanvas.setAttribute("aria-hidden", "true");
+      "position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;";
     const container = canvas.parentNode;
     if (defined(container)) {
-      // Ensure the parent is a positioning context
       const pos = window.getComputedStyle
         ? window.getComputedStyle(container).position
         : container.style.position;
@@ -184,10 +192,7 @@ function Scene(options) {
     }
     this._webGPUCanvas = webgpuCanvas;
 
-    // Keep the WebGPU canvas dimensions in sync with the WebGL canvas.
-    // A ResizeObserver is used when available (all modern browsers); otherwise
-    // the canvas dimensions are corrected lazily at the start of each render
-    // frame in WebGPURenderer._ensureDepthTexture.
+    // Keep the WebGPU canvas dimensions in sync with the container.
     if (typeof ResizeObserver !== "undefined") {
       this._webGPUResizeObserver = new ResizeObserver(() => {
         if (defined(this._webGPUCanvas)) {
@@ -211,16 +216,12 @@ function Scene(options) {
         }
         try {
           await renderer.createGlobePass(globeImageSource);
-
-          // WebGPU is now the sole visual renderer.  Hide the WebGL canvas so
-          // that none of its output (globe tiles, atmosphere, sky) is visible.
-          // The WebGL context continues to run in the background because the
-          // camera uniform state (view/projection matrices, sun direction) is
-          // computed there and forwarded to the WebGPU render pass each frame.
-          // DOM event handling (camera controls) is also routed through the
-          // underlying WebGL canvas, so hiding it with `visibility:hidden`
-          // rather than `display:none` preserves pointer-event delivery.
-          canvas.style.visibility = "hidden";
+          // Start the self-contained WebGPU render loop.  This loop is
+          // completely independent of the Cesium WebGL frame pipeline – it
+          // uses WebGPUCamera which computes correct WebGPU-native projection
+          // matrices (depth NDC ∈ [0, 1]) so the globe's front face is never
+          // clipped (no donut artefact).
+          renderer.startRenderLoop();
         } catch (globeErr) {
           console.warn("[Cesium] WebGPU globe pass creation failed.", globeErr);
         }
@@ -231,6 +232,8 @@ function Scene(options) {
         );
       })
       .catch((error) => {
+        // WebGPU not available – restore the WebGL canvas and fall back.
+        canvas.style.visibility = "";
         console.warn(
           "[Cesium] WebGPU initialisation failed, continuing with WebGL renderer.",
           error,
@@ -4389,22 +4392,6 @@ function postPassesUpdate(scene) {
 
 const scratchBackgroundColor = new Color();
 
-// Scratch storage for the WebGPU globe-pass uniform arrays (reused every frame
-// to avoid per-frame allocations).  Each matrix is 16 floats; the uniform
-// struct in the WGSL shader is { mvp(64B), mv(64B), lightDirEC(12B), time(4B) }
-// laid out with std140/WebGPU alignment – total 144 bytes at offset 0.
-// We keep a flat Float32Array and fill it manually.
-const _webGPUUniformBuf = new Float32Array(36); // 16 + 16 + 3 + 1 = 36 floats
-// WGS84 semi-major axis ≈ 6 378 137 m – used to scale the unit UV sphere in
-// the GlobePassVS to real-world Earth size.
-const _EARTH_RADIUS = 6378137.0;
-// Milliseconds-to-seconds conversion for the shader time uniform.
-const _MS_TO_SECONDS = 0.001;
-// Scratch Matrix4s for MVP / MV computation.
-const _scratchScaleMat = new Matrix4();
-const _scratchMVMat = new Matrix4();
-const _scratchMVPMat = new Matrix4();
-
 // ── Satellite-imagery texture URLs (tried in order, first success wins) ───────
 // These are standard equirectangular Earth textures where u=0 corresponds to
 // lon=-180° (international date line).  The UV sphere shifts u by +0.5 so that
@@ -4747,6 +4734,16 @@ function render(scene) {
 
   uniformState.update(frameState);
 
+  // ── WebGPU takes over rendering ───────────────────────────────────────────
+  // When WebGPU is active, its own requestAnimationFrame loop (started by
+  // WebGPURenderer.startRenderLoop()) handles all drawing.  We skip the
+  // WebGL rendering pass entirely so the hidden WebGL canvas does not waste
+  // GPU bandwidth drawing content that is never visible.
+  if (scene._webGPUReady && defined(scene._webGPURenderer)) {
+    return;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   const shadowMap = scene.shadowMap;
   if (defined(shadowMap) && shadowMap.enabled) {
     if (!defined(scene.light) || scene.light instanceof SunLight) {
@@ -4798,62 +4795,6 @@ function render(scene) {
   }
 
   context.endFrame();
-
-  // ── WebGPU globe pass ─────────────────────────────────────────────────────
-  // When a WebGPU renderer is active it is the sole visual renderer; the WebGL
-  // canvas is hidden.  We still run the full WebGL frame above to keep camera
-  // uniform state (view/projection, sun direction) up-to-date, then forward
-  // those matrices to the WebGPU globe render pass.
-  if (scene._webGPUReady && defined(scene._webGPURenderer)) {
-    renderWebGPUGlobeFrame(scene);
-  }
-}
-
-/**
- * Extracts the current Cesium camera matrices and dispatches a WebGPU globe
- * render pass on the dedicated WebGPU canvas.
- *
- * The globe in the WGSL shader is a unit UV-sphere scaled to WGS84's
- * semi-major axis so it correctly tracks the Cesium camera.
- *
- * @param {Scene} scene
- * @private
- */
-function renderWebGPUGlobeFrame(scene) {
-  const renderer = scene._webGPURenderer;
-  if (!renderer || !renderer.globePass || !renderer.globePass._ready) {
-    return;
-  }
-
-  const uniformState = scene.context.uniformState;
-
-  // Build Model = scale(EARTH_RADIUS) – the WGSL globe is a unit sphere.
-  Matrix4.fromUniformScale(_EARTH_RADIUS, _scratchScaleMat);
-
-  // MV  = view * model
-  Matrix4.multiply(uniformState.view, _scratchScaleMat, _scratchMVMat);
-
-  // MVP = projection * MV
-  Matrix4.multiply(uniformState.projection, _scratchMVMat, _scratchMVPMat);
-
-  // Pack uniforms into the scratch Float32Array.
-  // Layout matches GlobeUniforms in the WGSL shader:
-  //   mvp        : mat4x4<f32>  (offsets 0–15)
-  //   mv         : mat4x4<f32>  (offsets 16–31)
-  //   lightDirEC : vec3<f32>    (offsets 32–34)
-  //   time       : f32          (offset 35)
-  Matrix4.pack(_scratchMVPMat, _webGPUUniformBuf, 0);
-  Matrix4.pack(_scratchMVMat, _webGPUUniformBuf, 16);
-
-  const sun = uniformState.sunDirectionEC;
-  _webGPUUniformBuf[32] = sun.x;
-  _webGPUUniformBuf[33] = sun.y;
-  _webGPUUniformBuf[34] = sun.z;
-  _webGPUUniformBuf[35] = performance.now() * _MS_TO_SECONDS;
-
-  renderer.renderGlobePass({
-    uniformArray: _webGPUUniformBuf,
-  });
 }
 
 function tryAndCatchError(scene, functionToExecute) {
