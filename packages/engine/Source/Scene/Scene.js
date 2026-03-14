@@ -212,10 +212,23 @@ function Scene(options) {
         }
         try {
           await renderer.createGlobePass(globeImageSource);
+          // WebGPU globe pass is live.  Suppress the WebGL globe to prevent
+          // the dual-rendering flicker caused by both canvases drawing a globe
+          // at slightly different depths/radii.  Atmosphere, sky box, and UI
+          // widgets continue to render on the WebGL canvas.  This is
+          // intentional for the WebGPU migration path: the WebGPU UV-sphere
+          // globe replaces the WebGL tile-based globe surface.
+          if (defined(this.globe) && this.globe.show) {
+            this.globe.show = false;
+          }
         } catch (globeErr) {
           console.warn("[Cesium] WebGPU globe pass creation failed.", globeErr);
         }
         this._webGPUReady = true;
+        console.info(
+          "[Cesium] WebGPU renderer active. " +
+            "Verify via: viewer.scene.webGPUReady (should be true).",
+        );
       })
       .catch((error) => {
         console.warn(
