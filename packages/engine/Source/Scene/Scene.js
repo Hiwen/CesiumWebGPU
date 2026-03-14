@@ -40,6 +40,8 @@ import Context from "../Renderer/Context.js";
 import ContextLimits from "../Renderer/ContextLimits.js";
 import Pass from "../Renderer/Pass.js";
 import RenderState from "../Renderer/RenderState.js";
+import { isWebGPUSupported } from "../Renderer/WebGPU/WebGPUContext.js";
+import WebGPURenderer from "../Renderer/WebGPU/WebGPURenderer.js";
 import Atmosphere from "./Atmosphere.js";
 import BrdfLutGenerator from "./BrdfLutGenerator.js";
 import Camera from "./Camera.js";
@@ -147,6 +149,24 @@ function Scene(options) {
     this._context = new Context(canvas, contextOptions);
   }
   const context = this._context;
+
+  // WebGPU renderer – initialised asynchronously when WebGPU is supported and
+  // `options.useWebGPU` is not explicitly `false`.
+  this._webGPURenderer = undefined;
+  this._webGPUReady = false;
+  if (options.useWebGPU !== false && isWebGPUSupported()) {
+    WebGPURenderer.create(canvas, options.webGPUOptions)
+      .then((renderer) => {
+        this._webGPURenderer = renderer;
+        this._webGPUReady = true;
+      })
+      .catch((error) => {
+        console.warn(
+          "[Cesium] WebGPU initialisation failed, continuing with WebGL renderer.",
+          error,
+        );
+      });
+  }
 
   const hasCreditContainer = defined(creditContainer);
   if (!hasCreditContainer) {
@@ -815,6 +835,35 @@ Object.defineProperties(Scene.prototype, {
   canvas: {
     get: function () {
       return this._canvas;
+    },
+  },
+
+  /**
+   * The {@link WebGPURenderer} for this scene, or `undefined` if WebGPU is
+   * not supported or has not yet finished initialising.
+   *
+   * Listen to {@link Scene#webGPUReadyEvent} to be notified when the renderer
+   * becomes available.
+   *
+   * @memberof Scene.prototype
+   * @type {import("../Renderer/WebGPU/WebGPURenderer.js").default|undefined}
+   * @readonly
+   */
+  webGPURenderer: {
+    get: function () {
+      return this._webGPURenderer;
+    },
+  },
+
+  /**
+   * `true` once the WebGPU renderer has finished asynchronous initialisation.
+   * @memberof Scene.prototype
+   * @type {boolean}
+   * @readonly
+   */
+  webGPUReady: {
+    get: function () {
+      return this._webGPUReady;
     },
   },
 
@@ -5264,6 +5313,10 @@ Scene.prototype.destroy = function () {
     this.postProcessStages && this.postProcessStages.destroy();
 
   this._context = this._context && this._context.destroy();
+  this._webGPURenderer =
+    this._webGPURenderer &&
+    !this._webGPURenderer.isDestroyed() &&
+    this._webGPURenderer.destroy();
   this._frameState.creditDisplay =
     this._frameState.creditDisplay && this._frameState.creditDisplay.destroy();
 
