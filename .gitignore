@@ -21,6 +21,7 @@ Thumbs.db
 /Source/Widgets/
 /Source/Cesium.d.ts
 /Source/Cesium.js
+/Source/Shaders/WebGPU/
 
 /Specs/SpecList.js
 /Specs/jasmine/**

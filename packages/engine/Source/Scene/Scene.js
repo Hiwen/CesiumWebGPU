@@ -40,6 +40,8 @@ import Context from "../Renderer/Context.js";
 import ContextLimits from "../Renderer/ContextLimits.js";
 import Pass from "../Renderer/Pass.js";
 import RenderState from "../Renderer/RenderState.js";
+import { isWebGPUSupported } from "../Renderer/WebGPU/WebGPUContext.js";
+import WebGPURenderer from "../Renderer/WebGPU/WebGPURenderer.js";
 import Atmosphere from "./Atmosphere.js";
 import BrdfLutGenerator from "./BrdfLutGenerator.js";
 import Camera from "./Camera.js";
@@ -147,6 +149,74 @@ function Scene(options) {
     this._context = new Context(canvas, contextOptions);
   }
   const context = this._context;
+
+  // WebGPU renderer – initialised asynchronously when WebGPU is supported and
+  // `options.useWebGPU` is not explicitly `false`.
+  //
+  // A canvas can only hold one rendering context (WebGL OR WebGPU).  Since the
+  // main Cesium canvas already has a WebGL context, we create a sibling
+  // <canvas> of identical size positioned absolutely above it.  The overlay
+  // canvas has `pointer-events:none` so it does not intercept mouse/touch
+  // events that CesiumWidget routes to the underlying WebGL canvas.
+  this._webGPURenderer = undefined;
+  this._webGPUReady = false;
+  this._webGPUCanvas = undefined;
+  this._webGPUResizeObserver = undefined;
+  if (options.useWebGPU !== false && isWebGPUSupported()) {
+    // Create the overlay canvas
+    const webgpuCanvas = document.createElement("canvas");
+    webgpuCanvas.width = canvas.width;
+    webgpuCanvas.height = canvas.height;
+    webgpuCanvas.style.cssText =
+      "position:absolute;top:0;left:0;width:100%;height:100%;" +
+      "pointer-events:none;z-index:1;";
+    webgpuCanvas.setAttribute("aria-hidden", "true");
+    const container = canvas.parentNode;
+    if (defined(container)) {
+      // Ensure the parent is a positioning context
+      const pos = window.getComputedStyle
+        ? window.getComputedStyle(container).position
+        : container.style.position;
+      if (!pos || pos === "static") {
+        container.style.position = "relative";
+      }
+      container.appendChild(webgpuCanvas);
+    }
+    this._webGPUCanvas = webgpuCanvas;
+
+    // Keep the WebGPU canvas dimensions in sync with the WebGL canvas.
+    // A ResizeObserver is used when available (all modern browsers); otherwise
+    // the canvas dimensions are corrected lazily at the start of each render
+    // frame in WebGPURenderer._ensureDepthTexture.
+    if (typeof ResizeObserver !== "undefined") {
+      this._webGPUResizeObserver = new ResizeObserver(() => {
+        if (defined(this._webGPUCanvas)) {
+          this._webGPUCanvas.width = canvas.width;
+          this._webGPUCanvas.height = canvas.height;
+        }
+      });
+      this._webGPUResizeObserver.observe(canvas);
+    }
+
+    WebGPURenderer.create(webgpuCanvas, options.webGPUOptions)
+      .then(async (renderer) => {
+        this._webGPURenderer = renderer;
+        // Auto-create the globe pass with a procedural earth canvas so the
+        // WebGPU overlay renders immediately without caller intervention.
+        try {
+          await renderer.createGlobePass(createProceduralEarthCanvas(256, 128));
+        } catch (globeErr) {
+          console.warn("[Cesium] WebGPU globe pass creation failed.", globeErr);
+        }
+        this._webGPUReady = true;
+      })
+      .catch((error) => {
+        console.warn(
+          "[Cesium] WebGPU initialisation failed, continuing with WebGL renderer.",
+          error,
+        );
+      });
+  }
 
   const hasCreditContainer = defined(creditContainer);
   if (!hasCreditContainer) {
@@ -815,6 +885,35 @@ Object.defineProperties(Scene.prototype, {
   canvas: {
     get: function () {
       return this._canvas;
+    },
+  },
+
+  /**
+   * The {@link WebGPURenderer} for this scene, or `undefined` if WebGPU is
+   * not supported or has not yet finished initialising.
+   *
+   * Listen to {@link Scene#webGPUReadyEvent} to be notified when the renderer
+   * becomes available.
+   *
+   * @memberof Scene.prototype
+   * @type {object|undefined}
+   * @readonly
+   */
+  webGPURenderer: {
+    get: function () {
+      return this._webGPURenderer;
+    },
+  },
+
+  /**
+   * `true` once the WebGPU renderer has finished asynchronous initialisation.
+   * @memberof Scene.prototype
+   * @type {boolean}
+   * @readonly
+   */
+  webGPUReady: {
+    get: function () {
+      return this._webGPUReady;
     },
   },
 
@@ -4270,6 +4369,283 @@ function postPassesUpdate(scene) {
 
 const scratchBackgroundColor = new Color();
 
+// Scratch storage for the WebGPU globe-pass uniform arrays (reused every frame
+// to avoid per-frame allocations).  Each matrix is 16 floats; the uniform
+// struct in the WGSL shader is { mvp(64B), mv(64B), lightDirEC(12B), time(4B) }
+// laid out with std140/WebGPU alignment – total 144 bytes at offset 0.
+// We keep a flat Float32Array and fill it manually.
+const _webGPUUniformBuf = new Float32Array(36); // 16 + 16 + 3 + 1 = 36 floats
+// WGS84 semi-major axis ≈ 6 378 137 m – used to scale the unit UV sphere in
+// the GlobePassVS to real-world Earth size.
+const _EARTH_RADIUS = 6378137.0;
+// Milliseconds-to-seconds conversion for the shader time uniform.
+const _MS_TO_SECONDS = 0.001;
+// Scratch Matrix4s for MVP / MV computation.
+const _scratchScaleMat = new Matrix4();
+const _scratchMVMat = new Matrix4();
+const _scratchMVPMat = new Matrix4();
+
+/**
+ * Generates a procedural equirectangular Earth texture on a canvas element.
+ *
+ * The texture is used as the imagery source for the WebGPU overlay globe pass
+ * when no real satellite imagery is available.  It reproduces the same
+ * biome-based continental coloring used in the WGSL shaders.
+ *
+ * @param {number} [width=256]
+ * @param {number} [height=128]
+ * @returns {HTMLCanvasElement}
+ * @private
+ */
+function createProceduralEarthCanvas(width = 256, height = 128) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error(
+      "[Cesium] Failed to create 2D canvas context for WebGPU globe texture",
+    );
+  }
+  const img = ctx.createImageData(width, height);
+  const d = img.data;
+
+  // Continent mask polygons in (lon, lat) degrees – simplified outlines.
+  // Source: same outline data used in WebGPUEarthDemo.html.
+  const continents = [
+    // North America
+    [
+      [-170, 72],
+      [-140, 72],
+      [-100, 72],
+      [-80, 72],
+      [-70, 68],
+      [-60, 48],
+      [-54, 48],
+      [-50, 44],
+      [-60, 40],
+      [-75, 40],
+      [-75, 25],
+      [-90, 25],
+      [-100, 20],
+      [-90, 15],
+      [-78, 10],
+      [-85, 8],
+      [-100, 28],
+      [-110, 22],
+      [-118, 22],
+      [-120, 30],
+      [-130, 48],
+      [-140, 58],
+      [-155, 60],
+      [-165, 62],
+      [-170, 72],
+    ],
+    // South America
+    [
+      [-80, 12],
+      [-65, 12],
+      [-55, 0],
+      [-50, -5],
+      [-35, -8],
+      [-35, -20],
+      [-42, -23],
+      [-45, -30],
+      [-65, -35],
+      [-70, -40],
+      [-72, -50],
+      [-70, -55],
+      [-65, -55],
+      [-55, -52],
+      [-50, -35],
+      [-52, -25],
+      [-50, -15],
+      [-45, -5],
+      [-50, 0],
+      [-60, 8],
+      [-70, 10],
+      [-80, 12],
+    ],
+    // Europe
+    [
+      [-10, 36],
+      [10, 36],
+      [30, 36],
+      [42, 38],
+      [40, 42],
+      [30, 46],
+      [25, 50],
+      [35, 55],
+      [25, 60],
+      [25, 70],
+      [15, 70],
+      [5, 63],
+      [-5, 63],
+      [-20, 65],
+      [-25, 65],
+      [-30, 60],
+      [-10, 55],
+      [-10, 48],
+      [-10, 36],
+    ],
+    // Africa
+    [
+      [-18, 16],
+      [0, 16],
+      [15, 22],
+      [30, 22],
+      [45, 12],
+      [50, 10],
+      [45, 0],
+      [40, -5],
+      [35, -15],
+      [32, -28],
+      [28, -35],
+      [18, -35],
+      [16, -30],
+      [10, -18],
+      [8, -5],
+      [0, 5],
+      [-5, 5],
+      [-15, 10],
+      [-18, 16],
+    ],
+    // Asia (simplified – excludes island chains)
+    [
+      [30, 72],
+      [60, 72],
+      [80, 72],
+      [100, 72],
+      [140, 72],
+      [160, 68],
+      [160, 55],
+      [140, 45],
+      [135, 35],
+      [130, 25],
+      [115, 20],
+      [100, 10],
+      [105, 5],
+      [100, -5],
+      [115, -8],
+      [120, 20],
+      [120, 35],
+      [105, 50],
+      [90, 45],
+      [80, 35],
+      [70, 20],
+      [60, 20],
+      [50, 10],
+      [45, 12],
+      [30, 22],
+      [25, 40],
+      [30, 50],
+      [25, 60],
+      [30, 72],
+    ],
+    // Australia
+    [
+      [115, -22],
+      [130, -15],
+      [145, -15],
+      [150, -22],
+      [155, -28],
+      [150, -38],
+      [140, -38],
+      [130, -32],
+      [117, -35],
+      [115, -28],
+      [115, -22],
+    ],
+    // Greenland
+    [
+      [-60, 60],
+      [-45, 60],
+      [-30, 65],
+      [-20, 70],
+      [-25, 80],
+      [-35, 84],
+      [-50, 84],
+      [-65, 80],
+      [-72, 74],
+      [-68, 65],
+      [-60, 60],
+    ],
+  ];
+
+  function pointInPolygon(px, py, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i][0],
+        yi = polygon[i][1];
+      const xj = polygon[j][0],
+        yj = polygon[j][1];
+      const intersect =
+        yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi;
+      if (intersect) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const lon = (x / width) * 360 - 180;
+      const lat = 90 - (y / height) * 180;
+      const idx = (y * width + x) * 4;
+
+      // Polar ice caps.
+      const absLat = Math.abs(lat);
+      if (absLat > 75) {
+        d[idx] = 235;
+        d[idx + 1] = 245;
+        d[idx + 2] = 255;
+        d[idx + 3] = 255;
+        continue;
+      }
+
+      // Check continents.
+      let isLand = false;
+      for (const poly of continents) {
+        if (pointInPolygon(lon, lat, poly)) {
+          isLand = true;
+          break;
+        }
+      }
+
+      if (isLand) {
+        // Biome coloring by latitude band.
+        if (absLat < 15) {
+          d[idx] = 34;
+          d[idx + 1] = 100;
+          d[idx + 2] = 34; // Tropical green
+        } else if (absLat < 30) {
+          d[idx] = 160;
+          d[idx + 1] = 130;
+          d[idx + 2] = 60; // Savanna/desert
+        } else if (absLat < 50) {
+          d[idx] = 80;
+          d[idx + 1] = 120;
+          d[idx + 2] = 50; // Temperate
+        } else {
+          d[idx] = 100;
+          d[idx + 1] = 120;
+          d[idx + 2] = 80; // Taiga/tundra
+        }
+      } else {
+        // Ocean – depth shading by latitude.
+        const depthFactor = 0.6 + 0.4 * (1 - absLat / 90);
+        d[idx] = Math.round(10 * depthFactor);
+        d[idx + 1] = Math.round(60 * depthFactor);
+        d[idx + 2] = Math.round(180 * depthFactor);
+      }
+      d[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas;
+}
+
 /**
  * Render the scene
  *
@@ -4355,6 +4731,60 @@ function render(scene) {
   }
 
   context.endFrame();
+
+  // ── WebGPU overlay globe pass ─────────────────────────────────────────────
+  // If a WebGPU renderer is attached and ready, render the globe as a WebGPU
+  // draw on the sibling overlay canvas so the two canvases stay in sync.
+  if (scene._webGPUReady && defined(scene._webGPURenderer)) {
+    renderWebGPUGlobeFrame(scene);
+  }
+}
+
+/**
+ * Extracts the current Cesium camera matrices and dispatches a WebGPU globe
+ * render pass on the overlay canvas.
+ *
+ * The globe in the WGSL shader is a unit UV-sphere; we scale it by the WGS84
+ * semi-major axis so the WebGPU globe coincides with Cesium's WebGL globe.
+ *
+ * @param {Scene} scene
+ * @private
+ */
+function renderWebGPUGlobeFrame(scene) {
+  const renderer = scene._webGPURenderer;
+  if (!renderer || !renderer.globePass || !renderer.globePass._ready) {
+    return;
+  }
+
+  const uniformState = scene.context.uniformState;
+
+  // Build Model = scale(EARTH_RADIUS) – the WGSL globe is a unit sphere.
+  Matrix4.fromUniformScale(_EARTH_RADIUS, _scratchScaleMat);
+
+  // MV  = view * model
+  Matrix4.multiply(uniformState.view, _scratchScaleMat, _scratchMVMat);
+
+  // MVP = projection * MV
+  Matrix4.multiply(uniformState.projection, _scratchMVMat, _scratchMVPMat);
+
+  // Pack uniforms into the scratch Float32Array.
+  // Layout matches GlobeUniforms in the WGSL shader:
+  //   mvp        : mat4x4<f32>  (offsets 0–15)
+  //   mv         : mat4x4<f32>  (offsets 16–31)
+  //   lightDirEC : vec3<f32>    (offsets 32–34)
+  //   time       : f32          (offset 35)
+  Matrix4.pack(_scratchMVPMat, _webGPUUniformBuf, 0);
+  Matrix4.pack(_scratchMVMat, _webGPUUniformBuf, 16);
+
+  const sun = uniformState.sunDirectionEC;
+  _webGPUUniformBuf[32] = sun.x;
+  _webGPUUniformBuf[33] = sun.y;
+  _webGPUUniformBuf[34] = sun.z;
+  _webGPUUniformBuf[35] = performance.now() * _MS_TO_SECONDS;
+
+  renderer.renderGlobePass({
+    uniformArray: _webGPUUniformBuf,
+  });
 }
 
 function tryAndCatchError(scene, functionToExecute) {
@@ -5264,6 +5694,18 @@ Scene.prototype.destroy = function () {
     this.postProcessStages && this.postProcessStages.destroy();
 
   this._context = this._context && this._context.destroy();
+  this._webGPURenderer =
+    this._webGPURenderer &&
+    !this._webGPURenderer.isDestroyed() &&
+    this._webGPURenderer.destroy();
+  if (defined(this._webGPUResizeObserver)) {
+    this._webGPUResizeObserver.disconnect();
+    this._webGPUResizeObserver = undefined;
+  }
+  if (defined(this._webGPUCanvas) && defined(this._webGPUCanvas.parentNode)) {
+    this._webGPUCanvas.parentNode.removeChild(this._webGPUCanvas);
+  }
+  this._webGPUCanvas = undefined;
   this._frameState.creditDisplay =
     this._frameState.creditDisplay && this._frameState.creditDisplay.destroy();
 
