@@ -201,9 +201,8 @@ function Scene(options) {
     WebGPURenderer.create(webgpuCanvas, options.webGPUOptions)
       .then(async (renderer) => {
         this._webGPURenderer = renderer;
-        // Try to load a high-quality NASA Blue Marble satellite texture for the
-        // WebGPU globe overlay.  Fall back to an improved procedural texture
-        // when the network request fails or times out.
+        // Load satellite imagery for the WebGPU globe.  Try NASA Blue Marble
+        // from CDN first; fall back to a richer procedural texture.
         let globeImageSource;
         try {
           globeImageSource = await loadEarthSatelliteTexture();
@@ -212,22 +211,23 @@ function Scene(options) {
         }
         try {
           await renderer.createGlobePass(globeImageSource);
-          // WebGPU globe pass is live.  Suppress the WebGL globe to prevent
-          // the dual-rendering flicker caused by both canvases drawing a globe
-          // at slightly different depths/radii.  Atmosphere, sky box, and UI
-          // widgets continue to render on the WebGL canvas.  This is
-          // intentional for the WebGPU migration path: the WebGPU UV-sphere
-          // globe replaces the WebGL tile-based globe surface.
-          if (defined(this.globe) && this.globe.show) {
-            this.globe.show = false;
-          }
+
+          // WebGPU is now the sole visual renderer.  Hide the WebGL canvas so
+          // that none of its output (globe tiles, atmosphere, sky) is visible.
+          // The WebGL context continues to run in the background because the
+          // camera uniform state (view/projection matrices, sun direction) is
+          // computed there and forwarded to the WebGPU render pass each frame.
+          // DOM event handling (camera controls) is also routed through the
+          // underlying WebGL canvas, so hiding it with `visibility:hidden`
+          // rather than `display:none` preserves pointer-event delivery.
+          canvas.style.visibility = "hidden";
         } catch (globeErr) {
           console.warn("[Cesium] WebGPU globe pass creation failed.", globeErr);
         }
         this._webGPUReady = true;
         console.info(
-          "[Cesium] WebGPU renderer active. " +
-            "Verify via: viewer.scene.webGPUReady (should be true).",
+          "[Cesium] WebGPU renderer is the active renderer. " +
+            "Verify: viewer.scene.webGPUReady === true",
         );
       })
       .catch((error) => {
@@ -4799,9 +4799,11 @@ function render(scene) {
 
   context.endFrame();
 
-  // ── WebGPU overlay globe pass ─────────────────────────────────────────────
-  // If a WebGPU renderer is attached and ready, render the globe as a WebGPU
-  // draw on the sibling overlay canvas so the two canvases stay in sync.
+  // ── WebGPU globe pass ─────────────────────────────────────────────────────
+  // When a WebGPU renderer is active it is the sole visual renderer; the WebGL
+  // canvas is hidden.  We still run the full WebGL frame above to keep camera
+  // uniform state (view/projection, sun direction) up-to-date, then forward
+  // those matrices to the WebGPU globe render pass.
   if (scene._webGPUReady && defined(scene._webGPURenderer)) {
     renderWebGPUGlobeFrame(scene);
   }
@@ -4809,10 +4811,10 @@ function render(scene) {
 
 /**
  * Extracts the current Cesium camera matrices and dispatches a WebGPU globe
- * render pass on the overlay canvas.
+ * render pass on the dedicated WebGPU canvas.
  *
- * The globe in the WGSL shader is a unit UV-sphere; we scale it by the WGS84
- * semi-major axis so the WebGPU globe coincides with Cesium's WebGL globe.
+ * The globe in the WGSL shader is a unit UV-sphere scaled to WGS84's
+ * semi-major axis so it correctly tracks the Cesium camera.
  *
  * @param {Scene} scene
  * @private

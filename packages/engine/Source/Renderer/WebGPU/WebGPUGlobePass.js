@@ -105,10 +105,16 @@ fn main(f : FragIn) -> @location(0) vec4<f32> {
   col += vec3<f32>(1.0, 0.97, 0.90)
        * pow(clamp(dot(N, normalize(L + V)), 0.0, 1.0), 65.0) * isWater * 0.22;
 
-  // Fresnel rim
-  col += vec3<f32>(0.08, 0.20, 0.68) * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 3.2) * 0.48;
+  // Atmosphere glow – simulates the blue limb brightening seen in WebGL's
+  // SkyAtmosphere (now hidden).  The exponent 2.5 gives a broad halo that
+  // starts well before the geometric horizon; 0.85 intensity and the blue-
+  // shifted RGB (0.10, 0.38, 0.92) approximate the Rayleigh-scattered hue
+  // visible from low Earth orbit.  Adjust intensity if the halo looks too
+  // bright or too dim relative to the globe surface.
+  let rim = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 2.5);
+  col += vec3<f32>(0.10, 0.38, 0.92) * rim * 0.85;
 
-  // Night ambient
+  // Night ambient – a very faint blue-black glow on the unlit hemisphere.
   col += vec3<f32>(0.003, 0.005, 0.018) * (1.0 - clamp(ndl * 2.2 + 0.35, 0.0, 1.0));
 
   return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
@@ -481,9 +487,13 @@ WebGPUGlobePass.prototype.render = function (
   device.queue.writeBuffer(this._uniformBuffer, 0, buf);
 
   // ── Record render pass ──────────────────────────────────────────────────────
-  // Use a transparent clear colour (alpha = 0) so the WebGL canvas underneath
-  // (atmosphere, sky, imagery) shows through the WebGPU overlay canvas.
-  const cc = uniforms.clearColor ?? { r: 0, g: 0, b: 0, a: 0 };
+  // WebGPU is the sole visual renderer; use an opaque deep-space background.
+  // The WebGL canvas is hidden (visibility:hidden) so there is no need for
+  // transparency compositing.  The RGB values (0.003, 0.004, 0.018) produce a
+  // deep midnight blue – intentionally close to the night-ambient colour in the
+  // fragment shader so the space around the globe blends seamlessly with the
+  // unlit hemisphere rather than appearing as a hard-edged cut.
+  const cc = uniforms.clearColor ?? { r: 0.003, g: 0.004, b: 0.018, a: 1.0 };
   const pass = commandEncoder.beginRenderPass({
     colorAttachments: [
       {
