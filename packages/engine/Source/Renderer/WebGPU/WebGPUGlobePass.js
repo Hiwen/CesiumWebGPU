@@ -423,10 +423,14 @@ WebGPUGlobePass.prototype._createBindGroups = function (device) {
  * @param {GPUTextureView} colorView  Swap-chain texture view.
  * @param {GPUTextureView} depthView  Depth texture view.
  * @param {object} uniforms
- * @param {Float32Array} uniforms.mvp        Column-major 4×4 MVP matrix.
- * @param {Float32Array} uniforms.mv         Column-major 4×4 MV matrix.
- * @param {number[]}     uniforms.lightDirEC [x,y,z] sun direction in eye space.
- * @param {number}       uniforms.time       Seconds since page load.
+ * @param {Float32Array} [uniforms.uniformArray]  Pre-packed 36-float array in the
+ *   layout `[mvp(0..15), mv(16..31), lightDirEC(32..34), time(35)]`.  Used by
+ *   `Scene.renderWebGPUGlobeFrame` for zero-allocation per-frame uploads.
+ *   When provided the individual properties below are ignored.
+ * @param {Float32Array} [uniforms.mvp]        Column-major 4×4 MVP matrix (legacy path).
+ * @param {Float32Array} [uniforms.mv]         Column-major 4×4 MV matrix (legacy path).
+ * @param {number[]}     [uniforms.lightDirEC] [x,y,z] sun direction in eye space (legacy path).
+ * @param {number}       [uniforms.time]       Seconds since page load (legacy path).
  * @param {object}       [uniforms.clearColor]  Optional RGBA clear color.
  */
 WebGPUGlobePass.prototype.render = function (
@@ -444,16 +448,23 @@ WebGPUGlobePass.prototype.render = function (
   // ── Write uniform buffer (reuse pre-allocated staging buffer) ───────────────
   const buf = this._uniformStagingBuf;
   buf.fill(0);
-  // mvp (offset 0, 16 floats)
-  buf.set(uniforms.mvp, 0);
-  // mv (offset 16, 16 floats)
-  buf.set(uniforms.mv, 16);
-  // lightDirEC (offset 32, 3 floats)
-  buf[32] = uniforms.lightDirEC[0];
-  buf[33] = uniforms.lightDirEC[1];
-  buf[34] = uniforms.lightDirEC[2];
-  // time (offset 35)
-  buf[35] = uniforms.time ?? 0;
+  if (uniforms.uniformArray) {
+    // Fast path from Scene.renderWebGPUGlobeFrame: uniformArray is a 36-float
+    // pre-packed Float32Array { mvp[0..15], mv[16..31], lightDirEC[32..34], time[35] }.
+    buf.set(uniforms.uniformArray, 0);
+  } else {
+    // Legacy path used by the standalone demo (WebGPUCesiumViewer.html).
+    // mvp (offset 0, 16 floats)
+    buf.set(uniforms.mvp, 0);
+    // mv (offset 16, 16 floats)
+    buf.set(uniforms.mv, 16);
+    // lightDirEC (offset 32, 3 floats)
+    buf[32] = uniforms.lightDirEC[0];
+    buf[33] = uniforms.lightDirEC[1];
+    buf[34] = uniforms.lightDirEC[2];
+    // time (offset 35)
+    buf[35] = uniforms.time ?? 0;
+  }
   device.queue.writeBuffer(this._uniformBuffer, 0, buf);
 
   // ── Record render pass ──────────────────────────────────────────────────────
