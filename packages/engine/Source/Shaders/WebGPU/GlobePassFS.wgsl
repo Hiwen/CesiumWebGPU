@@ -63,12 +63,17 @@ fn ss(e0 : f32, e1 : f32, x : f32) -> f32 {
 
 @fragment
 fn main(f : FragIn) -> @location(0) vec4<f32> {
-  // ── Imagery surface ─────────────────────────────────────────────────────────
-  let texColor = textureSample(earthTex, earthSampler, f.uv);
+  // Normalize vertex UV u from the [0.5, 1.5] range back into [0, 1) before
+  // passing to textureSample.  The vertex u was shifted +0.5 so that phi=0
+  // (prime meridian, ECEF +X) maps to u=0.5 in a standard equirectangular
+  // texture.  fract() collapses the range; the sampler's repeat mode handles
+  // any sub-texel wrap.
+  let uv = vec2<f32>(fract(f.uv.x), f.uv.y);
+  let texColor = textureSample(earthTex, earthSampler, uv);
   var col = texColor.rgb;
 
   // ── Animated cloud layer (same fbm as GlobeFS.wgsl) ─────────────────────────
-  let cuv   = f.uv + vec2<f32>(u.time * 0.004, 0.0);
+  let cuv   = uv + vec2<f32>(u.time * 0.004, 0.0);
   let cloud = ss(0.60, 0.68, fbm(cuv * vec2<f32>(5.0, 8.0)));
   col = mix(col, vec3<f32>(0.97, 0.98, 1.0), cloud * 0.60);
 

@@ -81,11 +81,17 @@ fn ss(e0 : f32, e1 : f32, x : f32) -> f32 {
 
 @fragment
 fn main(f : FragIn) -> @location(0) vec4<f32> {
-  let texColor = textureSample(earthTex, earthSampler, f.uv);
+  // Normalize vertex UV u from the [0.5, 1.5] range back into [0, 1) before
+  // passing to textureSample.  The vertex u was shifted +0.5 so that phi=0
+  // (prime meridian, ECEF +X) maps to u=0.5 in a standard equirectangular
+  // texture.  fract() collapses the range without a geometry seam; the
+  // sampler's addressModeU:"repeat" then handles any sub-texel wrap.
+  let uv = vec2<f32>(fract(f.uv.x), f.uv.y);
+  let texColor = textureSample(earthTex, earthSampler, uv);
   var col = texColor.rgb;
 
   // Cloud layer (FBM — same as GlobeFS.wgsl)
-  let cuv = f.uv + vec2<f32>(u.time * 0.004, 0.0);
+  let cuv = uv + vec2<f32>(u.time * 0.004, 0.0);
   col = mix(col, vec3<f32>(0.97, 0.98, 1.0),
             ss(0.60, 0.68, fbm(cuv * vec2<f32>(5.0, 8.0))) * 0.60);
 
@@ -228,9 +234,12 @@ WebGPUGlobePass.prototype._buildSphere = function (
       const phi = (j / lonSegments) * 2 * Math.PI;
       const sinP = Math.sin(phi);
       const cosP = Math.cos(phi);
+      // ECEF-compatible orientation so the sphere aligns with Cesium's world-space axes:
+      //   phi=0 → x=+1  (ECEF +X = prime meridian at equator)
+      //   theta=0 → z=+1 (ECEF +Z = geographic north pole, because cos(0)=1)
       const x = sinT * cosP;
-      const y = cosT;
-      const z = sinT * sinP;
+      const y = sinT * sinP;
+      const z = cosT;
       // position == normal for a unit sphere
       vd[vi++] = x;
       vd[vi++] = y;
@@ -238,8 +247,12 @@ WebGPUGlobePass.prototype._buildSphere = function (
       vd[vi++] = x;
       vd[vi++] = y;
       vd[vi++] = z;
-      vd[vi++] = j / lonSegments; // u
-      vd[vi++] = i / latSegments; // v
+      // UV: shift u by +0.5 so the prime meridian (phi=0, ECEF +X) maps to u=0.5,
+      // which is the centre of a standard equirectangular Earth texture (lon=0°).
+      // The u range [0.5, 1.5] is handled correctly by the repeat sampler and
+      // by fract() in the fragment shader.
+      vd[vi++] = j / lonSegments + 0.5; // u
+      vd[vi++] = i / latSegments; // v: 0=north pole, 1=south pole
     }
   }
 
@@ -468,7 +481,9 @@ WebGPUGlobePass.prototype.render = function (
   device.queue.writeBuffer(this._uniformBuffer, 0, buf);
 
   // ── Record render pass ──────────────────────────────────────────────────────
-  const cc = uniforms.clearColor ?? { r: 0.003, g: 0.006, b: 0.018, a: 1.0 };
+  // Use a transparent clear colour (alpha = 0) so the WebGL canvas underneath
+  // (atmosphere, sky, imagery) shows through the WebGPU overlay canvas.
+  const cc = uniforms.clearColor ?? { r: 0, g: 0, b: 0, a: 0 };
   const pass = commandEncoder.beginRenderPass({
     colorAttachments: [
       {

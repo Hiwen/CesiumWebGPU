@@ -201,10 +201,17 @@ function Scene(options) {
     WebGPURenderer.create(webgpuCanvas, options.webGPUOptions)
       .then(async (renderer) => {
         this._webGPURenderer = renderer;
-        // Auto-create the globe pass with a procedural earth canvas so the
-        // WebGPU overlay renders immediately without caller intervention.
+        // Try to load a high-quality NASA Blue Marble satellite texture for the
+        // WebGPU globe overlay.  Fall back to an improved procedural texture
+        // when the network request fails or times out.
+        let globeImageSource;
         try {
-          await renderer.createGlobePass(createProceduralEarthCanvas(256, 128));
+          globeImageSource = await loadEarthSatelliteTexture();
+        } catch (_fetchErr) {
+          globeImageSource = createProceduralEarthCanvas(1024, 512);
+        }
+        try {
+          await renderer.createGlobePass(globeImageSource);
         } catch (globeErr) {
           console.warn("[Cesium] WebGPU globe pass creation failed.", globeErr);
         }
@@ -4385,6 +4392,47 @@ const _scratchScaleMat = new Matrix4();
 const _scratchMVMat = new Matrix4();
 const _scratchMVPMat = new Matrix4();
 
+// ── Satellite-imagery texture URLs (tried in order, first success wins) ───────
+// These are standard equirectangular Earth textures where u=0 corresponds to
+// lon=-180° (international date line).  The UV sphere shifts u by +0.5 so that
+// the prime meridian (lon=0°) lands at the texture centre (u=0.5).
+const _EARTH_TEXTURE_URLS = [
+  // NASA Blue Marble (land + ocean + ice + clouds, 2048×1024 JPEG)
+  "https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57735/land_ocean_ice_cloud_2048.jpg",
+  // Wikimedia mirror of Blue Marble 2002 PNG
+  "https://upload.wikimedia.org/wikipedia/commons/thumb/2/23/Blue_Marble_2002.png/2048px-Blue_Marble_2002.png",
+];
+
+/**
+ * Attempts to fetch a real satellite Earth texture from a CDN.
+ *
+ * Tries each URL in {@link _EARTH_TEXTURE_URLS} with a 12-second timeout.
+ * Resolves with an {@link ImageBitmap} on success; rejects if all URLs fail.
+ *
+ * @returns {Promise<ImageBitmap>}
+ * @private
+ */
+async function loadEarthSatelliteTexture() {
+  for (const url of _EARTH_TEXTURE_URLS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+      const resp = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      return await createImageBitmap(blob);
+    } catch (err) {
+      clearTimeout(timer);
+      console.debug(`[Cesium] WebGPU earth texture failed for ${url}:`, err.message ?? err);
+      // Try the next URL.
+    }
+  }
+  throw new Error("[Cesium] All satellite texture URLs failed.");
+}
+
 /**
  * Generates a procedural equirectangular Earth texture on a canvas element.
  *
@@ -4392,12 +4440,16 @@ const _scratchMVPMat = new Matrix4();
  * when no real satellite imagery is available.  It reproduces the same
  * biome-based continental coloring used in the WGSL shaders.
  *
- * @param {number} [width=256]
- * @param {number} [height=128]
+ * Coordinate convention:  u=0 → lon=-180° (date line),  u=1 → lon=+180°.
+ * The UV sphere shifts by +0.5, so the prime meridian (lon=0°) appears at
+ * u=0.5 (centre of texture), matching standard equirectangular conventions.
+ *
+ * @param {number} [width=512]
+ * @param {number} [height=256]
  * @returns {HTMLCanvasElement}
  * @private
  */
-function createProceduralEarthCanvas(width = 256, height = 128) {
+function createProceduralEarthCanvas(width = 512, height = 256) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
@@ -4633,11 +4685,13 @@ function createProceduralEarthCanvas(width = 256, height = 128) {
           d[idx + 2] = 80; // Taiga/tundra
         }
       } else {
-        // Ocean – depth shading by latitude.
-        const depthFactor = 0.6 + 0.4 * (1 - absLat / 90);
-        d[idx] = Math.round(10 * depthFactor);
-        d[idx + 1] = Math.round(60 * depthFactor);
-        d[idx + 2] = Math.round(180 * depthFactor);
+        // Ocean – depth shading by latitude.  Use a richer blue palette that
+        // enables the ocean specular and water-detection pass in the shader
+        // (blue channel significantly higher than red channel).
+        const depthFactor = 0.55 + 0.45 * (1 - absLat / 90);
+        d[idx] = Math.round(8 * depthFactor);
+        d[idx + 1] = Math.round(55 * depthFactor);
+        d[idx + 2] = Math.round(200 * depthFactor);
       }
       d[idx + 3] = 255;
     }
