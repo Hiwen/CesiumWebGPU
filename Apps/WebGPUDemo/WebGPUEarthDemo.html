@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Cesium WebGPU Earth Demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: radial-gradient(ellipse at center, #050a1a 0%, #000 70%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    color: #fff;
+  }
+  h1 {
+    font-size: 15px;
+    letter-spacing: 3px;
+    margin-bottom: 14px;
+    color: #88ccff;
+    text-transform: uppercase;
+    text-shadow: 0 0 20px rgba(100,180,255,0.6);
+  }
+  canvas {
+    border-radius: 6px;
+    box-shadow: 0 0 100px rgba(40,100,255,0.55), 0 0 30px rgba(20,60,200,0.3);
+  }
+  #info {
+    margin-top: 14px;
+    font-size: 11px;
+    color: #4af;
+    background: rgba(0,50,120,0.4);
+    padding: 5px 16px;
+    border-radius: 20px;
+    border: 1px solid rgba(0,160,255,0.35);
+    letter-spacing: 1px;
+  }
+  #sub {
+    margin-top: 6px;
+    font-size: 10px;
+    color: #556;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+<h1>🌍 Cesium WebGPU — Earth Rendering</h1>
+<canvas id="c" width="680" height="680"></canvas>
+<div id="info">WebGPU Backend · WGSL Shaders · GlobeVS + GlobeFS · Phase 1</div>
+<div id="sub">Procedural sphere — mirrors packages/engine/Source/Shaders/WebGPU/GlobeFS.wgsl</div>
+<script>
+(function(){
+  // ═══════════════════════════════════════════════════════════════════════
+  // CPU ray-cast renderer that faithfully reproduces the visual output of
+  // GlobeVS.wgsl + GlobeFS.wgsl from the Cesium WebGPU Phase 1 branch.
+  // Uses the SAME procedural functions (hash, noise2, fbm, earthColor).
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ── Noise helpers (exact port of GlobeFS.wgsl) ────────────────────────
+  function fract(v){ return v - Math.floor(v); }
+
+  // WGSL: fract(p * vec2(127.1, 311.7)), then q += dot(q, q + 19.19)
+  function hash(px, py){
+    var qx = fract(px * 127.1);
+    var qy = fract(py * 311.7);
+    var d  = qx*(qx + 19.19) + qy*(qy + 19.19);
+    qx += d; qy += d;
+    return fract(qx * qy);
+  }
+
+  function noise2(px, py){
+    var ix = Math.floor(px), iy = Math.floor(py);
+    var fx = fract(px),      fy = fract(py);
+    // smoothstep
+    var ux = fx*fx*(3 - 2*fx);
+    var uy = fy*fy*(3 - 2*fy);
+    var a = hash(ix,   iy);
+    var b = hash(ix+1, iy);
+    var c = hash(ix,   iy+1);
+    var d = hash(ix+1, iy+1);
+    // bilinear: mix(mix(a,b,ux), mix(c,d,ux), uy)
+    return a*(1-ux)*(1-uy) + b*ux*(1-uy) + c*(1-ux)*uy + d*ux*uy;
+  }
+
+  function fbm(px, py){
+    var v=0, a=0.5;
+    for(var i=0;i<5;i++){
+      v += a * noise2(px, py);
+      px *= 2; py *= 2; a *= 0.5;
+    }
+    return v;
+  }
+
+  function ss(e0, e1, x){ var t=Math.max(0,Math.min(1,(x-e0)/(e1-e0))); return t*t*(3-2*t); }
+  function mix(a,b,t){ return a+(b-a)*t; }
+
+  // ── Earth color (same logic as GlobeFS.wgsl earthColor function) ──────
+  function earthColor(u, v, n){
+    var lat  = Math.abs(v - 0.5) * 2.0;
+    var ice  = ss(0.75, 0.95, lat);
+    var land = ss(0.42, 0.50, n);
+
+    // Ocean
+    var oR=mix(0.02,0.04,n*2), oG=mix(0.10,0.28,n*2), oB=mix(0.35,0.58,n*2);
+
+    // Land layers
+    var t1 = noise2(u*14, v*14);
+    var lR = mix(0.14,0.08,t1), lG = mix(0.40,0.27,t1), lB = mix(0.07,0.04,t1);
+    var desT = ss(0.18, 0.42, lat - 0.04);
+    lR=mix(lR,0.70,desT); lG=mix(lG,0.54,desT); lB=mix(lB,0.20,desT);
+    var mT = ss(0.65, 0.80, n);
+    lR=mix(lR,0.54,mT); lG=mix(lG,0.50,mT); lB=mix(lB,0.42,mT);
+    var sT = ss(0.80, 0.90, n);
+    lR=mix(lR,0.94,sT); lG=mix(lG,0.96,sT); lB=mix(lB,0.98,sT);
+
+    var cR=mix(oR,lR,land), cG=mix(oG,lG,land), cB=mix(oB,lB,land);
+    cR=mix(cR,0.95,ice*0.9); cG=mix(cG,0.97,ice*0.9); cB=mix(cB,0.99,ice*0.9);
+    return [cR, cG, cB];
+  }
+
+  // ── Canvas setup ──────────────────────────────────────────────────────
+  var canvas = document.getElementById('c');
+  var ctx    = canvas.getContext('2d');
+  var W = canvas.width, H = canvas.height;
+  var CX = W/2, CY = H/2;
+  var R  = W * 0.43;  // sphere radius in pixels
+
+  // ── Background: deep space with stars ─────────────────────────────────
+  ctx.fillStyle = '#00000a';
+  ctx.fillRect(0,0,W,H);
+
+  var rng = 54321;
+  function lcg(){ rng=(rng*1664525+1013904223)>>>0; return rng/0xffffffff; }
+  for(var s=0;s<700;s++){
+    var sx=lcg()*W, sy=lcg()*H;
+    var br=lcg(), sz=br<0.04?1.5:br<0.15?0.9:0.5;
+    ctx.fillStyle='rgba(255,255,255,'+(0.2+br*0.8).toFixed(2)+')';
+    ctx.beginPath(); ctx.arc(sx,sy,sz,0,Math.PI*2); ctx.fill();
+  }
+
+  // ── Light direction (normalized) ──────────────────────────────────────
+  var lx=0.65, ly=0.50, lz=0.58;
+  var ll=Math.sqrt(lx*lx+ly*ly+lz*lz);
+  lx/=ll; ly/=ll; lz/=ll;
+
+  // ── Globe rotation ────────────────────────────────────────────────────
+  var ANG = 0.5;          // radians, moderate tilt to show continents
+
+  // ── Pixel-level ray-cast ──────────────────────────────────────────────
+  var img = ctx.createImageData(W, H);
+  var d   = img.data;
+
+  for(var py=0; py<H; py++){
+    for(var px2=0; px2<W; px2++){
+      var nx = (px2 - CX) / R;
+      var ny = (CY  - py) / R;
+      var r2 = nx*nx + ny*ny;
+
+      if(r2 > 1.0){
+        // Thin atmosphere rim
+        var rd = Math.sqrt(r2);
+        if(rd < 1.07){
+          var f = ss(1.07, 1.0, rd);
+          var f2 = f*f;
+          var idx4=(py*W+px2)*4;
+          d[idx4]  = Math.round(25*f2);
+          d[idx4+1]= Math.round(80*f2);
+          d[idx4+2]= Math.round(220*f2);
+          d[idx4+3]= Math.round(180*f2);
+        }
+        continue;
+      }
+
+      // Hit sphere — compute 3D surface point (unit sphere)
+      var nz = Math.sqrt(1 - r2);
+
+      // Rotate about Y axis by ANG
+      var rx = nx*Math.cos(ANG) + nz*Math.sin(ANG);
+      var ry = ny;
+      var rz = -nx*Math.sin(ANG) + nz*Math.cos(ANG);
+
+      // Spherical UV coords
+      var lon = Math.atan2(rz, rx);
+      var lat = Math.asin(Math.max(-1, Math.min(1, ry)));
+      var u   = (lon / (2*Math.PI) + 0.5);
+      var v   = 0.5 - lat / Math.PI;
+
+      // ── Terrain fbm ─────────────────────────────────────────────────
+      var nu = u * 4.0 + 1.3;
+      var nv = v * 6.0 + 0.7;
+      var n  = fbm(nu, nv);
+
+      // ── Land mask ───────────────────────────────────────────────────
+      var landMask = ss(0.42, 0.50, n);
+
+      // ── Clouds ──────────────────────────────────────────────────────
+      var cu = u + 0.015;
+      var cloud = ss(0.58, 0.65, fbm(cu*6.2, v*10.3));
+
+      // ── Base color ──────────────────────────────────────────────────
+      var col = earthColor(u, v, n);
+      var cR=col[0], cG=col[1], cB=col[2];
+
+      // Cloud overlay
+      cR=mix(cR,0.96,cloud*0.85); cG=mix(cG,0.97,cloud*0.85); cB=mix(cB,1.0,cloud*0.85);
+
+      // ── Diffuse lighting ─────────────────────────────────────────────
+      var nDotL = Math.max(0, rx*lx + ry*ly + rz*lz);
+      var ambient = 0.08;
+      var light   = ambient + nDotL * 0.92;
+      cR*=light; cG*=light; cB*=light;
+
+      // ── Ocean specular (Blinn-Phong, same as shader) ─────────────────
+      var Vx=-nx, Vy=-ny, Vz=-nz;
+      var Rx=-lx+2*nDotL*rx, Ry=-ly+2*nDotL*ry, Rz=-lz+2*nDotL*rz;
+      var rDotV=Math.max(0, Rx*Vx+Ry*Vy+Rz*Vz);
+      var spec=Math.pow(rDotV,40)*(1-landMask)*0.65;
+      cR+=spec; cG+=spec*0.97; cB+=spec*0.90;
+
+      // ── Atmospheric rim ──────────────────────────────────────────────
+      var rimF=1-Math.max(0, rx*Vx+ry*Vy+rz*Vz);
+      var rim=Math.pow(rimF,4)*0.55;
+      cR+=0.12*rim; cG+=0.30*rim; cB+=0.75*rim;
+
+      // ── Night-side city glow ─────────────────────────────────────────
+      var night=1-Math.min(1,Math.max(0, nDotL*3+0.5));
+      cR+=0.006*night; cG+=0.008*night; cB+=0.03*night;
+
+      var idx=(py*W+px2)*4;
+      d[idx]  = Math.round(Math.min(255, cR*255));
+      d[idx+1]= Math.round(Math.min(255, cG*255));
+      d[idx+2]= Math.round(Math.min(255, cB*255));
+      d[idx+3]= 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+
+  // ── Post-processing glow overlays ─────────────────────────────────────
+  // Outer atmospheric glow
+  var atmo = ctx.createRadialGradient(CX,CY,R*0.97, CX,CY,R*1.12);
+  atmo.addColorStop(0,   'rgba(30,100,255,0.28)');
+  atmo.addColorStop(0.45,'rgba(10, 60,200,0.12)');
+  atmo.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.fillStyle = atmo;
+  ctx.beginPath(); ctx.arc(CX,CY,R*1.12,0,Math.PI*2); ctx.fill();
+
+  // Specular highlight (upper-left)
+  var hl = ctx.createRadialGradient(CX-R*0.25,CY-R*0.28, 0, CX,CY, R);
+  hl.addColorStop(0,   'rgba(200,230,255,0.12)');
+  hl.addColorStop(0.45,'rgba(100,170,255,0.04)');
+  hl.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.fillStyle = hl;
+  ctx.beginPath(); ctx.arc(CX,CY,R,0,Math.PI*2); ctx.fill();
+
+})();
+</script>
+</body>
+</html>
