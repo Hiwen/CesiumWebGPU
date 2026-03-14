@@ -22,3 +22,4 @@ export { default as WebGPURenderPipeline, toGPUPrimitiveTopology } from "./WebGP
 export { default as WebGPUCommandEncoder } from "./WebGPUCommandEncoder.js";
 export { default as WebGPUDrawCommand } from "./WebGPUDrawCommand.js";
 export { default as WebGPURenderer } from "./WebGPURenderer.js";
+export { default as WebGPUGlobePass } from "./WebGPUGlobePass.js";

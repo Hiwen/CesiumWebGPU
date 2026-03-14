@@ -5,6 +5,7 @@ import RuntimeError from "../../Core/RuntimeError.js";
 import WebGPUContext, { isWebGPUSupported } from "./WebGPUContext.js";
 import WebGPUCommandEncoder from "./WebGPUCommandEncoder.js";
 import WebGPUTexture from "./WebGPUTexture.js";
+import WebGPUGlobePass from "./WebGPUGlobePass.js";
 
 /**
  * High-level WebGPU renderer that manages the per-frame rendering loop.
@@ -36,6 +37,13 @@ function WebGPURenderer(context) {
   // Execute render-command lists accumulated during scene traversal.
   this._opaqueCommandList = [];
   this._translucentCommandList = [];
+
+  /**
+   * The {@link WebGPUGlobePass} instance, created via
+   * {@link WebGPURenderer#createGlobePass}.
+   * @type {WebGPUGlobePass|undefined}
+   */
+  this.globePass = undefined;
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
@@ -209,6 +217,56 @@ WebGPURenderer.prototype.beginTranslucentPass = function () {
   });
 };
 
+// ─── Globe Pass ───────────────────────────────────────────────────────────────
+
+/**
+ * Creates and initialises a {@link WebGPUGlobePass} for this renderer.
+ *
+ * Call this once after the renderer is created (e.g. after `webGPUReady` is
+ * `true`), passing in the equirectangular imagery source.
+ *
+ * @param {ImageBitmap|HTMLCanvasElement|OffscreenCanvas|string|URL} imageSource
+ *   Equirectangular Earth imagery (passed to {@link WebGPUGlobePass.create}).
+ * @returns {Promise<WebGPUGlobePass>}
+ */
+WebGPURenderer.prototype.createGlobePass = async function (imageSource) {
+  if (defined(this.globePass) && !this.globePass.isDestroyed()) {
+    this.globePass.destroy();
+  }
+  this.globePass = await WebGPUGlobePass.create(this._context, imageSource);
+  return this.globePass;
+};
+
+/**
+ * Renders a single globe frame using the current {@link WebGPUGlobePass}.
+ *
+ * Automatically calls {@link WebGPURenderer#beginFrame} /
+ * {@link WebGPURenderer#endFrame} if no frame is currently in flight.
+ *
+ * @param {object} uniforms  Forwarded verbatim to {@link WebGPUGlobePass#render}.
+ * @param {Float32Array} uniforms.mvp
+ * @param {Float32Array} uniforms.mv
+ * @param {number[]}     uniforms.lightDirEC
+ * @param {number}       uniforms.time
+ */
+WebGPURenderer.prototype.renderGlobePass = function (uniforms) {
+  if (!defined(this.globePass) || !this.globePass._ready) {
+    return;
+  }
+
+  const canvas = this._context.canvas;
+  this._ensureDepthTexture(canvas.width, canvas.height);
+
+  const commandEncoder = this._context.device.createCommandEncoder({
+    label: "GlobeFrameEncoder",
+  });
+  const colorView = this._context.getCurrentTextureView();
+
+  this.globePass.render(commandEncoder, colorView, this._depthView, uniforms);
+
+  this._context.device.queue.submit([commandEncoder.finish()]);
+};
+
 /**
  * Ends the current frame by finalising the command encoder and submitting
  * all recorded commands to the GPU queue.
@@ -274,6 +332,9 @@ WebGPURenderer.prototype.isDestroyed = function () {
 WebGPURenderer.prototype.destroy = function () {
   if (defined(this._depthTexture) && !this._depthTexture.isDestroyed()) {
     this._depthTexture.destroy();
+  }
+  if (defined(this.globePass) && !this.globePass.isDestroyed()) {
+    this.globePass.destroy();
   }
   this._context.destroy();
   return destroyObject(this);

@@ -152,10 +152,53 @@ function Scene(options) {
 
   // WebGPU renderer – initialised asynchronously when WebGPU is supported and
   // `options.useWebGPU` is not explicitly `false`.
+  //
+  // A canvas can only hold one rendering context (WebGL OR WebGPU).  Since the
+  // main Cesium canvas already has a WebGL context, we create a sibling
+  // <canvas> of identical size positioned absolutely above it.  The overlay
+  // canvas has `pointer-events:none` so it does not intercept mouse/touch
+  // events that CesiumWidget routes to the underlying WebGL canvas.
   this._webGPURenderer = undefined;
   this._webGPUReady = false;
+  this._webGPUCanvas = undefined;
+  this._webGPUResizeObserver = undefined;
   if (options.useWebGPU !== false && isWebGPUSupported()) {
-    WebGPURenderer.create(canvas, options.webGPUOptions)
+    // Create the overlay canvas
+    const webgpuCanvas = document.createElement("canvas");
+    webgpuCanvas.width = canvas.width;
+    webgpuCanvas.height = canvas.height;
+    webgpuCanvas.style.cssText =
+      "position:absolute;top:0;left:0;width:100%;height:100%;" +
+      "pointer-events:none;z-index:1;";
+    webgpuCanvas.setAttribute("aria-hidden", "true");
+    const container = canvas.parentNode;
+    if (defined(container)) {
+      // Ensure the parent is a positioning context
+      const pos = window.getComputedStyle
+        ? window.getComputedStyle(container).position
+        : container.style.position;
+      if (!pos || pos === "static") {
+        container.style.position = "relative";
+      }
+      container.appendChild(webgpuCanvas);
+    }
+    this._webGPUCanvas = webgpuCanvas;
+
+    // Keep the WebGPU canvas dimensions in sync with the WebGL canvas.
+    // A ResizeObserver is used when available (all modern browsers); otherwise
+    // the canvas dimensions are corrected lazily at the start of each render
+    // frame in WebGPURenderer._ensureDepthTexture.
+    if (typeof ResizeObserver !== "undefined") {
+      this._webGPUResizeObserver = new ResizeObserver(() => {
+        if (defined(this._webGPUCanvas)) {
+          this._webGPUCanvas.width = canvas.width;
+          this._webGPUCanvas.height = canvas.height;
+        }
+      });
+      this._webGPUResizeObserver.observe(canvas);
+    }
+
+    WebGPURenderer.create(webgpuCanvas, options.webGPUOptions)
       .then((renderer) => {
         this._webGPURenderer = renderer;
         this._webGPUReady = true;
@@ -5317,6 +5360,17 @@ Scene.prototype.destroy = function () {
     this._webGPURenderer &&
     !this._webGPURenderer.isDestroyed() &&
     this._webGPURenderer.destroy();
+  if (defined(this._webGPUResizeObserver)) {
+    this._webGPUResizeObserver.disconnect();
+    this._webGPUResizeObserver = undefined;
+  }
+  if (
+    defined(this._webGPUCanvas) &&
+    defined(this._webGPUCanvas.parentNode)
+  ) {
+    this._webGPUCanvas.parentNode.removeChild(this._webGPUCanvas);
+  }
+  this._webGPUCanvas = undefined;
   this._frameState.creditDisplay =
     this._frameState.creditDisplay && this._frameState.creditDisplay.destroy();
 
