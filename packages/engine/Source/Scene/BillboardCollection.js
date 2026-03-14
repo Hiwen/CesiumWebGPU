@@ -35,7 +35,7 @@ import TextureAtlas from "../Renderer/TextureAtlas.js";
 import VerticalOrigin from "./VerticalOrigin.js";
 import Ellipsoid from "../Core/Ellipsoid.js";
 import WebGLConstants from "../Core/WebGLConstants.js";
-import DeveloperError from "../Core/DeveloperError.js";
+import deprecationWarning from "../Core/deprecationWarning.js";
 
 const SHOW_INDEX = Billboard.SHOW_INDEX;
 const POSITION_INDEX = Billboard.POSITION_INDEX;
@@ -59,7 +59,25 @@ const SDF_INDEX = Billboard.SDF_INDEX;
 const SPLIT_DIRECTION_INDEX = Billboard.SPLIT_DIRECTION_INDEX;
 const NUMBER_OF_PROPERTIES = Billboard.NUMBER_OF_PROPERTIES;
 
-const attributeLocations = {
+let attributeLocations;
+
+const attributeLocationsBatched = {
+  positionHighAndScale: 0,
+  positionLowAndRotation: 1,
+  compressedAttribute0: 2, // pixel offset, translate, horizontal origin, vertical origin, show, direction, texture coordinates
+  compressedAttribute1: 3, // aligned axis, translucency by distance, image width
+  compressedAttribute2: 4, // image height, color, pick color, size in meters, valid aligned axis, 13 bits free
+  eyeOffset: 5, // 4 bytes free
+  scaleByDistance: 6,
+  pixelOffsetScaleByDistance: 7,
+  compressedAttribute3: 8,
+  textureCoordinateBoundsOrLabelTranslate: 9,
+  a_batchId: 10,
+  sdf: 11,
+  splitDirection: 12,
+};
+
+const attributeLocationsInstanced = {
   direction: 0,
   positionHighAndScale: 1,
   positionLowAndRotation: 2, // texture offset in w
@@ -708,7 +726,44 @@ BillboardCollection.prototype.get = function (index) {
   return this._billboards[index];
 };
 
-function getIndexBuffer(context) {
+let getIndexBuffer;
+
+function getIndexBufferBatched(context) {
+  const sixteenK = 16 * 1024;
+
+  let indexBuffer = context.cache.billboardCollection_indexBufferBatched;
+  if (defined(indexBuffer)) {
+    return indexBuffer;
+  }
+
+  // Subtract 6 because the last index is reserverd for primitive restart.
+  // https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.18
+  const length = sixteenK * 6 - 6;
+  const indices = new Uint16Array(length);
+  for (let i = 0, j = 0; i < length; i += 6, j += 4) {
+    indices[i] = j;
+    indices[i + 1] = j + 1;
+    indices[i + 2] = j + 2;
+
+    indices[i + 3] = j + 0;
+    indices[i + 4] = j + 2;
+    indices[i + 5] = j + 3;
+  }
+
+  // PERFORMANCE_IDEA:  Should we reference count billboard collections, and eventually delete this?
+  // Is this too much memory to allocate up front?  Should we dynamically grow it?
+  indexBuffer = Buffer.createIndexBuffer({
+    context: context,
+    typedArray: indices,
+    usage: BufferUsage.STATIC_DRAW,
+    indexDatatype: IndexDatatype.UNSIGNED_SHORT,
+  });
+  indexBuffer.vertexArrayDestroyable = false;
+  context.cache.billboardCollection_indexBufferBatched = indexBuffer;
+  return indexBuffer;
+}
+
+function getIndexBufferInstanced(context) {
   let indexBuffer = context.cache.billboardCollection_indexBufferInstanced;
   if (defined(indexBuffer)) {
     return indexBuffer;
@@ -758,7 +813,14 @@ BillboardCollection.prototype.computeNewBuffersUsage = function () {
   return usageChanged;
 };
 
-function createVAF(context, numberOfBillboards, buffersUsage, batchTable, sdf) {
+function createVAF(
+  context,
+  numberOfBillboards,
+  buffersUsage,
+  instanced,
+  batchTable,
+  sdf,
+) {
   const attributes = [
     {
       index: attributeLocations.positionHighAndScale,
@@ -826,14 +888,17 @@ function createVAF(context, numberOfBillboards, buffersUsage, batchTable, sdf) {
       componentDatatype: ComponentDatatype.FLOAT,
       usage: buffersUsage[SPLIT_DIRECTION_INDEX],
     },
-    // Instancing requires one non-instanced attribute.
-    {
+  ];
+
+  // Instancing requires one non-instanced attribute.
+  if (instanced) {
+    attributes.push({
       index: attributeLocations.direction,
       componentsPerAttribute: 2,
       componentDatatype: ComponentDatatype.FLOAT,
       vertexBuffer: getVertexBufferInstanced(context),
-    },
-  ];
+    });
+  }
 
   if (defined(batchTable)) {
     attributes.push({
@@ -853,8 +918,11 @@ function createVAF(context, numberOfBillboards, buffersUsage, batchTable, sdf) {
     });
   }
 
-  // One vertex is needed for each (instanced) billboard.
-  return new VertexArrayFacade(context, attributes, numberOfBillboards, true);
+  // When instancing is enabled, only one vertex is needed for each billboard.
+  const sizeInVertices = instanced
+    ? numberOfBillboards
+    : 4 * numberOfBillboards;
+  return new VertexArrayFacade(context, attributes, sizeInVertices, instanced);
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -872,6 +940,7 @@ function writePositionScaleAndRotation(
   vafWriters,
   billboard,
 ) {
+  let i;
   const positionHighWriter =
     vafWriters[attributeLocations.positionHighAndScale];
   const positionLowWriter =
@@ -903,8 +972,22 @@ function writePositionScaleAndRotation(
   const high = writePositionScratch.high;
   const low = writePositionScratch.low;
 
-  positionHighWriter(billboard._index, high.x, high.y, high.z, scale);
-  positionLowWriter(billboard._index, low.x, low.y, low.z, rotation);
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    positionHighWriter(i, high.x, high.y, high.z, scale);
+    positionLowWriter(i, low.x, low.y, low.z, rotation);
+  } else {
+    i = billboard._index * 4;
+    positionHighWriter(i + 0, high.x, high.y, high.z, scale);
+    positionHighWriter(i + 1, high.x, high.y, high.z, scale);
+    positionHighWriter(i + 2, high.x, high.y, high.z, scale);
+    positionHighWriter(i + 3, high.x, high.y, high.z, scale);
+
+    positionLowWriter(i + 0, low.x, low.y, low.z, rotation);
+    positionLowWriter(i + 1, low.x, low.y, low.z, rotation);
+    positionLowWriter(i + 2, low.x, low.y, low.z, rotation);
+    positionLowWriter(i + 3, low.x, low.y, low.z, rotation);
+  }
 }
 
 const scratchCartesian2 = new Cartesian2();
@@ -921,6 +1004,11 @@ const LEFT_SHIFT2 = 4.0;
 
 const RIGHT_SHIFT8 = 1.0 / 256.0;
 
+const LOWER_LEFT = 0.0;
+const LOWER_RIGHT = 2.0;
+const UPPER_RIGHT = 3.0;
+const UPPER_LEFT = 1.0;
+
 const scratchBoundingRectangle = new BoundingRectangle();
 
 function writeCompressedAttrib0(
@@ -929,6 +1017,7 @@ function writeCompressedAttrib0(
   vafWriters,
   billboard,
 ) {
+  let i;
   const writer = vafWriters[attributeLocations.compressedAttribute0];
   const pixelOffset = billboard.pixelOffset;
   const pixelOffsetX = pixelOffset.x;
@@ -968,6 +1057,8 @@ function writeCompressedAttrib0(
 
   let bottomLeftX = 0;
   let bottomLeftY = 0;
+  let width = 0;
+  let height = 0;
   if (billboard.ready) {
     const imageRectangle = billboard.computeTextureCoordinates(
       scratchBoundingRectangle,
@@ -975,7 +1066,11 @@ function writeCompressedAttrib0(
 
     bottomLeftX = imageRectangle.x;
     bottomLeftY = imageRectangle.y;
+    width = imageRectangle.width;
+    height = imageRectangle.height;
   }
+  const topRightX = bottomLeftX + width;
+  const topRightY = bottomLeftY + height;
 
   let compressed0 =
     Math.floor(
@@ -1016,14 +1111,50 @@ function writeCompressedAttrib0(
   scratchCartesian2.y = bottomLeftY;
   const compressedTexCoordsLL =
     AttributeCompression.compressTextureCoordinates(scratchCartesian2);
+  scratchCartesian2.x = topRightX;
+  const compressedTexCoordsLR =
+    AttributeCompression.compressTextureCoordinates(scratchCartesian2);
+  scratchCartesian2.y = topRightY;
+  const compressedTexCoordsUR =
+    AttributeCompression.compressTextureCoordinates(scratchCartesian2);
+  scratchCartesian2.x = bottomLeftX;
+  const compressedTexCoordsUL =
+    AttributeCompression.compressTextureCoordinates(scratchCartesian2);
 
-  writer(
-    billboard._index,
-    compressed0,
-    compressed1,
-    compressed2,
-    compressedTexCoordsLL,
-  );
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    writer(i, compressed0, compressed1, compressed2, compressedTexCoordsLL);
+  } else {
+    i = billboard._index * 4;
+    writer(
+      i + 0,
+      compressed0 + LOWER_LEFT,
+      compressed1,
+      compressed2,
+      compressedTexCoordsLL,
+    );
+    writer(
+      i + 1,
+      compressed0 + LOWER_RIGHT,
+      compressed1,
+      compressed2,
+      compressedTexCoordsLR,
+    );
+    writer(
+      i + 2,
+      compressed0 + UPPER_RIGHT,
+      compressed1,
+      compressed2,
+      compressedTexCoordsUR,
+    );
+    writer(
+      i + 3,
+      compressed0 + UPPER_LEFT,
+      compressed1,
+      compressed2,
+      compressedTexCoordsUL,
+    );
+  }
 }
 
 function writeCompressedAttrib1(
@@ -1032,6 +1163,7 @@ function writeCompressedAttrib1(
   vafWriters,
   billboard,
 ) {
+  let i;
   const writer = vafWriters[attributeLocations.compressedAttribute1];
   const alignedAxis = billboard.alignedAxis;
   if (!Cartesian3.equals(alignedAxis, Cartesian3.ZERO)) {
@@ -1081,7 +1213,16 @@ function writeCompressedAttrib1(
   farValue = farValue === 1.0 ? 255.0 : (farValue * 255.0) | 0;
   compressed1 = compressed1 * LEFT_SHIFT8 + farValue;
 
-  writer(billboard._index, compressed0, compressed1, near, far);
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    writer(i, compressed0, compressed1, near, far);
+  } else {
+    i = billboard._index * 4;
+    writer(i + 0, compressed0, compressed1, near, far);
+    writer(i + 1, compressed0, compressed1, near, far);
+    writer(i + 2, compressed0, compressed1, near, far);
+    writer(i + 3, compressed0, compressed1, near, far);
+  }
 }
 
 function writeCompressedAttrib2(
@@ -1090,6 +1231,7 @@ function writeCompressedAttrib2(
   vafWriters,
   billboard,
 ) {
+  let i;
   const writer = vafWriters[attributeLocations.compressedAttribute2];
   const color = billboard.color;
   const pickColor = !defined(billboardCollection._batchTable)
@@ -1121,7 +1263,16 @@ function writeCompressedAttrib2(
     (sizeInMeters * 2.0 + validAlignedAxis);
   const compressed3 = imageHeight * LEFT_SHIFT2 + labelHorizontalOrigin;
 
-  writer(billboard._index, compressed0, compressed1, compressed2, compressed3);
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    writer(i, compressed0, compressed1, compressed2, compressed3);
+  } else {
+    i = billboard._index * 4;
+    writer(i + 0, compressed0, compressed1, compressed2, compressed3);
+    writer(i + 1, compressed0, compressed1, compressed2, compressed3);
+    writer(i + 2, compressed0, compressed1, compressed2, compressed3);
+    writer(i + 3, compressed0, compressed1, compressed2, compressed3);
+  }
 }
 
 function writeEyeOffset(
@@ -1130,6 +1281,7 @@ function writeEyeOffset(
   vafWriters,
   billboard,
 ) {
+  let i;
   const writer = vafWriters[attributeLocations.eyeOffset];
   const eyeOffset = billboard.eyeOffset;
 
@@ -1145,28 +1297,31 @@ function writeEyeOffset(
     Math.abs(eyeOffsetZ),
   );
 
-  scratchCartesian2.x = 0;
-  scratchCartesian2.y = 0;
+  if (billboardCollection._instanced) {
+    scratchCartesian2.x = 0;
+    scratchCartesian2.y = 0;
 
-  if (billboard.ready) {
-    const imageRectangle = billboard.computeTextureCoordinates(
-      scratchBoundingRectangle,
-    );
+    if (billboard.ready) {
+      const imageRectangle = billboard.computeTextureCoordinates(
+        scratchBoundingRectangle,
+      );
 
-    scratchCartesian2.x = imageRectangle.width;
-    scratchCartesian2.y = imageRectangle.height;
+      scratchCartesian2.x = imageRectangle.width;
+      scratchCartesian2.y = imageRectangle.height;
+    }
+
+    const compressedTexCoordsRange =
+      AttributeCompression.compressTextureCoordinates(scratchCartesian2);
+
+    i = billboard._index;
+    writer(i, eyeOffset.x, eyeOffset.y, eyeOffsetZ, compressedTexCoordsRange);
+  } else {
+    i = billboard._index * 4;
+    writer(i + 0, eyeOffset.x, eyeOffset.y, eyeOffsetZ, 0.0);
+    writer(i + 1, eyeOffset.x, eyeOffset.y, eyeOffsetZ, 0.0);
+    writer(i + 2, eyeOffset.x, eyeOffset.y, eyeOffsetZ, 0.0);
+    writer(i + 3, eyeOffset.x, eyeOffset.y, eyeOffsetZ, 0.0);
   }
-
-  const compressedTexCoordsRange =
-    AttributeCompression.compressTextureCoordinates(scratchCartesian2);
-
-  writer(
-    billboard._index,
-    eyeOffset.x,
-    eyeOffset.y,
-    eyeOffsetZ,
-    compressedTexCoordsRange,
-  );
 }
 
 function writeScaleByDistance(
@@ -1175,6 +1330,7 @@ function writeScaleByDistance(
   vafWriters,
   billboard,
 ) {
+  let i;
   const writer = vafWriters[attributeLocations.scaleByDistance];
   let near = 0.0;
   let nearValue = 1.0;
@@ -1195,7 +1351,16 @@ function writeScaleByDistance(
     }
   }
 
-  writer(billboard._index, near, nearValue, far, farValue);
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    writer(i, near, nearValue, far, farValue);
+  } else {
+    i = billboard._index * 4;
+    writer(i + 0, near, nearValue, far, farValue);
+    writer(i + 1, near, nearValue, far, farValue);
+    writer(i + 2, near, nearValue, far, farValue);
+    writer(i + 3, near, nearValue, far, farValue);
+  }
 }
 
 function writePixelOffsetScaleByDistance(
@@ -1204,6 +1369,7 @@ function writePixelOffsetScaleByDistance(
   vafWriters,
   billboard,
 ) {
+  let i;
   const writer = vafWriters[attributeLocations.pixelOffsetScaleByDistance];
   let near = 0.0;
   let nearValue = 1.0;
@@ -1224,7 +1390,16 @@ function writePixelOffsetScaleByDistance(
     }
   }
 
-  writer(billboard._index, near, nearValue, far, farValue);
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    writer(i, near, nearValue, far, farValue);
+  } else {
+    i = billboard._index * 4;
+    writer(i + 0, near, nearValue, far, farValue);
+    writer(i + 1, near, nearValue, far, farValue);
+    writer(i + 2, near, nearValue, far, farValue);
+    writer(i + 3, near, nearValue, far, farValue);
+  }
 }
 
 function writeCompressedAttribute3(
@@ -1233,6 +1408,7 @@ function writeCompressedAttribute3(
   vafWriters,
   billboard,
 ) {
+  let i;
   const writer = vafWriters[attributeLocations.compressedAttribute3];
   let near = 0.0;
   let far = Number.MAX_VALUE;
@@ -1276,7 +1452,16 @@ function writeCompressedAttribute3(
   const h = Math.floor(CesiumMath.clamp(imageHeight, 0.0, LEFT_SHIFT12));
   const dimensions = w * LEFT_SHIFT12 + h;
 
-  writer(billboard._index, near, far, disableDepthTestDistance, dimensions);
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    writer(i, near, far, disableDepthTestDistance, dimensions);
+  } else {
+    i = billboard._index * 4;
+    writer(i + 0, near, far, disableDepthTestDistance, dimensions);
+    writer(i + 1, near, far, disableDepthTestDistance, dimensions);
+    writer(i + 2, near, far, disableDepthTestDistance, dimensions);
+    writer(i + 3, near, far, disableDepthTestDistance, dimensions);
+  }
 }
 
 function writeTextureCoordinateBoundsOrLabelTranslate(
@@ -1296,18 +1481,59 @@ function writeTextureCoordinateBoundsOrLabelTranslate(
     billboardCollection._shaderClampToGround =
       context.depthTexture && !globeTranslucent && depthTestAgainstTerrain;
   }
+  let i;
   const writer =
     vafWriters[attributeLocations.textureCoordinateBoundsOrLabelTranslate];
 
-  //write _labelTranslate, used by depth testing in the vertex shader
-  let translateX = 0;
-  let translateY = 0;
-  if (defined(billboard._labelTranslate)) {
-    translateX = billboard._labelTranslate.x;
-    translateY = billboard._labelTranslate.y;
+  if (ContextLimits.maximumVertexTextureImageUnits > 0) {
+    //write _labelTranslate, used by depth testing in the vertex shader
+    let translateX = 0;
+    let translateY = 0;
+    if (defined(billboard._labelTranslate)) {
+      translateX = billboard._labelTranslate.x;
+      translateY = billboard._labelTranslate.y;
+    }
+    if (billboardCollection._instanced) {
+      i = billboard._index;
+      writer(i, translateX, translateY, 0.0, 0.0);
+    } else {
+      i = billboard._index * 4;
+      writer(i + 0, translateX, translateY, 0.0, 0.0);
+      writer(i + 1, translateX, translateY, 0.0, 0.0);
+      writer(i + 2, translateX, translateY, 0.0, 0.0);
+      writer(i + 3, translateX, translateY, 0.0, 0.0);
+    }
+    return;
   }
 
-  writer(billboard._index, translateX, translateY, 0.0, 0.0);
+  // Write texture coordinate bounds, used by depth testing in fragment shader
+  let minX = 0;
+  let minY = 0;
+  let width = 0;
+  let height = 0;
+  if (billboard.ready) {
+    const imageRectangle = billboard.computeTextureCoordinates(
+      scratchBoundingRectangle,
+    );
+
+    minX = imageRectangle.x;
+    minY = imageRectangle.y;
+    width = imageRectangle.width;
+    height = imageRectangle.height;
+  }
+  const maxX = minX + width;
+  const maxY = minY + height;
+
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    writer(i, minX, minY, maxX, maxY);
+  } else {
+    i = billboard._index * 4;
+    writer(i + 0, minX, minY, maxX, maxY);
+    writer(i + 1, minX, minY, maxX, maxY);
+    writer(i + 2, minX, minY, maxX, maxY);
+    writer(i + 3, minX, minY, maxX, maxY);
+  }
 }
 
 function writeBatchId(billboardCollection, frameState, vafWriters, billboard) {
@@ -1318,7 +1544,17 @@ function writeBatchId(billboardCollection, frameState, vafWriters, billboard) {
   const writer = vafWriters[attributeLocations.a_batchId];
   const id = billboard._batchIndex;
 
-  writer(billboard._index, id);
+  let i;
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    writer(i, id);
+  } else {
+    i = billboard._index * 4;
+    writer(i + 0, id);
+    writer(i + 1, id);
+    writer(i + 2, id);
+    writer(i + 3, id);
+  }
 }
 
 function writeSDF(billboardCollection, frameState, vafWriters, billboard) {
@@ -1326,6 +1562,7 @@ function writeSDF(billboardCollection, frameState, vafWriters, billboard) {
     return;
   }
 
+  let i;
   const writer = vafWriters[attributeLocations.sdf];
 
   const outlineColor = billboard.outlineColor;
@@ -1339,7 +1576,16 @@ function writeSDF(billboardCollection, frameState, vafWriters, billboard) {
     Color.floatToByte(outlineColor.alpha) * LEFT_SHIFT16 +
     Color.floatToByte(outlineDistance) * LEFT_SHIFT8;
 
-  writer(billboard._index, compressed0, compressed1);
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    writer(i, compressed0, compressed1);
+  } else {
+    i = billboard._index * 4;
+    writer(i + 0, compressed0 + LOWER_LEFT, compressed1);
+    writer(i + 1, compressed0 + LOWER_RIGHT, compressed1);
+    writer(i + 2, compressed0 + UPPER_RIGHT, compressed1);
+    writer(i + 3, compressed0 + UPPER_LEFT, compressed1);
+  }
 }
 
 function writeSplitDirection(
@@ -1356,7 +1602,17 @@ function writeSplitDirection(
     direction = split;
   }
 
-  writer(billboard._index, direction);
+  let i;
+  if (billboardCollection._instanced) {
+    i = billboard._index;
+    writer(i, direction);
+  } else {
+    i = billboard._index * 4;
+    writer(i + 0, direction);
+    writer(i + 1, direction);
+    writer(i + 2, direction);
+    writer(i + 3, direction);
+  }
 }
 
 function writeBillboard(
@@ -1573,12 +1829,21 @@ BillboardCollection.prototype.update = function (frameState) {
     !context.instancedArrays ||
     !(ContextLimits.maximumVertexTextureImageUnits > 0)
   ) {
-    throw new DeveloperError(
-      "Beginning in CesiumJS 1.140, billboards and labels require device support for WebGL 2, " +
+    deprecationWarning(
+      "Billboard-unsupported-ANGLE_instanced_arrays",
+      "Beginning in CesiumJS 1.140, billboards and labels will require device support for WebGL 2, " +
         "or WebGL 1 with ANGLE_instanced_arrays and MAX_VERTEX_TEXTURE_IMAGE_UNITS > 0. For more " +
         "information or to share feedback, see: https://github.com/CesiumGS/cesium/issues/13053",
     );
   }
+
+  this._instanced = context.instancedArrays;
+  attributeLocations = this._instanced
+    ? attributeLocationsInstanced
+    : attributeLocationsBatched;
+  getIndexBuffer = this._instanced
+    ? getIndexBufferInstanced
+    : getIndexBufferBatched;
 
   let billboards = this._billboards;
   let billboardsLength = billboards.length;
@@ -1651,6 +1916,7 @@ BillboardCollection.prototype.update = function (frameState) {
         context,
         billboardsLength,
         this._buffersUsage,
+        this._instanced,
         this._batchTable,
         this._sdf,
       );
@@ -1690,7 +1956,9 @@ BillboardCollection.prototype.update = function (frameState) {
       properties[SHOW_INDEX]
     ) {
       writers.push(writeCompressedAttrib0);
-      writers.push(writeEyeOffset);
+      if (this._instanced) {
+        writers.push(writeEyeOffset);
+      }
     }
 
     if (
@@ -1767,7 +2035,11 @@ BillboardCollection.prototype.update = function (frameState) {
           writers[o](this, frameState, vafWriters, bb);
         }
 
-        this._vaf.subCommit(bb._index, 1);
+        if (this._instanced) {
+          this._vaf.subCommit(bb._index, 1);
+        } else {
+          this._vaf.subCommit(bb._index * 4, 4);
+        }
       }
       this._vaf.endSubCommits();
     }
@@ -1865,6 +2137,9 @@ BillboardCollection.prototype.update = function (frameState) {
   let fs;
   let vertDefines;
 
+  const supportVSTextureReads =
+    ContextLimits.maximumVertexTextureImageUnits > 0;
+
   if (
     blendOptionChanged ||
     this._shaderRotation !== this._compiledShaderRotation ||
@@ -1884,7 +2159,7 @@ BillboardCollection.prototype.update = function (frameState) {
     vsSource = BillboardCollectionVS;
     fsSource = BillboardCollectionFS;
 
-    vertDefines = ["INSTANCED"];
+    vertDefines = [];
     if (defined(this._batchTable)) {
       vertDefines.push("VECTOR_TILE");
       vsSource = this._batchTable.getVertexShaderCallback(
@@ -1902,7 +2177,9 @@ BillboardCollection.prototype.update = function (frameState) {
       defines: vertDefines,
       sources: [vsSource],
     });
-
+    if (this._instanced) {
+      vs.defines.push("INSTANCED");
+    }
     if (this._shaderRotation) {
       vs.defines.push("ROTATION");
     }
@@ -1925,7 +2202,11 @@ BillboardCollection.prototype.update = function (frameState) {
       vs.defines.push("DISABLE_DEPTH_DISTANCE");
     }
     if (this._shaderClampToGround) {
-      vs.defines.push("VS_THREE_POINT_DEPTH_CHECK");
+      if (supportVSTextureReads) {
+        vs.defines.push("VS_THREE_POINT_DEPTH_CHECK");
+      } else {
+        vs.defines.push("FS_THREE_POINT_DEPTH_CHECK");
+      }
     }
 
     const sdfEdge = 1.0 - SDFSettings.CUTOFF;
@@ -1942,7 +2223,11 @@ BillboardCollection.prototype.update = function (frameState) {
         sources: [fsSource],
       });
       if (this._shaderClampToGround) {
-        fs.defines.push("VS_THREE_POINT_DEPTH_CHECK");
+        if (supportVSTextureReads) {
+          fs.defines.push("VS_THREE_POINT_DEPTH_CHECK");
+        } else {
+          fs.defines.push("FS_THREE_POINT_DEPTH_CHECK");
+        }
       }
 
       if (this._sdf) {
@@ -1963,7 +2248,11 @@ BillboardCollection.prototype.update = function (frameState) {
         sources: [fsSource],
       });
       if (this._shaderClampToGround) {
-        fs.defines.push("VS_THREE_POINT_DEPTH_CHECK");
+        if (supportVSTextureReads) {
+          fs.defines.push("VS_THREE_POINT_DEPTH_CHECK");
+        } else {
+          fs.defines.push("FS_THREE_POINT_DEPTH_CHECK");
+        }
       }
       if (this._sdf) {
         fs.defines.push("SDF");
@@ -1984,7 +2273,11 @@ BillboardCollection.prototype.update = function (frameState) {
         sources: [fsSource],
       });
       if (this._shaderClampToGround) {
-        fs.defines.push("VS_THREE_POINT_DEPTH_CHECK");
+        if (supportVSTextureReads) {
+          fs.defines.push("VS_THREE_POINT_DEPTH_CHECK");
+        } else {
+          fs.defines.push("FS_THREE_POINT_DEPTH_CHECK");
+        }
       }
       if (this._sdf) {
         fs.defines.push("SDF");
@@ -2005,7 +2298,11 @@ BillboardCollection.prototype.update = function (frameState) {
         sources: [fsSource],
       });
       if (this._shaderClampToGround) {
-        fs.defines.push("VS_THREE_POINT_DEPTH_CHECK");
+        if (supportVSTextureReads) {
+          fs.defines.push("VS_THREE_POINT_DEPTH_CHECK");
+        } else {
+          fs.defines.push("FS_THREE_POINT_DEPTH_CHECK");
+        }
       }
       if (this._sdf) {
         fs.defines.push("SDF");
@@ -2082,8 +2379,10 @@ BillboardCollection.prototype.update = function (frameState) {
       command.debugShowBoundingVolume = this.debugShowBoundingVolume;
       command.pickId = pickId;
 
-      command.count = 6;
-      command.instanceCount = billboardsLength;
+      if (this._instanced) {
+        command.count = 6;
+        command.instanceCount = billboardsLength;
+      }
 
       commandList.push(command);
     }

@@ -147,23 +147,18 @@ Batch.prototype.update = function (time) {
             this.depthFailMaterial,
           );
         }
-
-        const DepthFailAppearanceType = this.depthFailAppearanceType;
-
-        depthFailAppearance = new DepthFailAppearanceType({
+        depthFailAppearance = new this.depthFailAppearanceType({
           material: this.depthFailMaterial,
           translucent: this.translucent,
           closed: this.closed,
         });
       }
 
-      const AppearanceType = this.appearanceType;
-
       primitive = new Primitive({
         show: false,
         asynchronous: true,
         geometryInstances: geometries.slice(),
-        appearance: new AppearanceType({
+        appearance: new this.appearanceType({
           translucent: this.translucent,
           closed: this.closed,
         }),

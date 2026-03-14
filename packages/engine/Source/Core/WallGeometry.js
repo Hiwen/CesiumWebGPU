@@ -617,7 +617,7 @@ WallGeometry.createGeometry = function (wallGeometry) {
     attributes: attributes,
     indices: indices,
     primitiveType: PrimitiveType.TRIANGLES,
-    boundingSphere: BoundingSphere.fromVertices(positions),
+    boundingSphere: new BoundingSphere.fromVertices(positions),
   });
 };
 export default WallGeometry;

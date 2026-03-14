@@ -48,7 +48,6 @@ ITwinPlatform.RealityDataType = Object.freeze({
   PNTS: "PNTS",
   RealityMesh3DTiles: "RealityMesh3DTiles",
   Terrain3DTiles: "Terrain3DTiles",
-  GaussianSplat3DTiles: "GS_3DT",
   KML: "KML",
   GeoJSON: "GeoJSON",
   Unstructured: "Unstructured",

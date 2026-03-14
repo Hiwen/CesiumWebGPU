@@ -30,8 +30,6 @@ jobs:
         run: npm run markdownlint
       - name: format code
         run: npm run prettier-check
-      - name: build
-        run: npm run build
       - name: tsc
         run: npm run tsc
 

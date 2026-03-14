@@ -1905,7 +1905,11 @@ describe("Core/Matrix4", function () {
     );
     const rightRotation = Matrix3.fromRotationX(CesiumMath.toRadians(30.0));
     const right = Matrix4.fromRotationTranslation(rightRotation);
-    const expected = Matrix4.multiplyTransformation(left, right, new Matrix4());
+    const expected = new Matrix4.multiplyTransformation(
+      left,
+      right,
+      new Matrix4(),
+    );
     const result = new Matrix4();
     const returnedResult = Matrix4.multiplyByMatrix3(
       left,
@@ -1923,7 +1927,11 @@ describe("Core/Matrix4", function () {
     );
     const rightRotation = Matrix3.fromRotationX(CesiumMath.toRadians(30.0));
     const right = Matrix4.fromRotationTranslation(rightRotation);
-    const expected = Matrix4.multiplyTransformation(left, right, new Matrix4());
+    const expected = new Matrix4.multiplyTransformation(
+      left,
+      right,
+      new Matrix4(),
+    );
     const returnedResult = Matrix4.multiplyByMatrix3(left, rightRotation, left);
     expect(returnedResult).toBe(left);
     expect(left).toEqual(expected);

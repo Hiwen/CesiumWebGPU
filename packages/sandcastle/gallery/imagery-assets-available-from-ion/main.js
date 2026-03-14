@@ -52,7 +52,7 @@ showLayer(3830186);
 
 viewer.scene.camera.flyTo({
   duration: 0,
-  destination: Cesium.Rectangle.fromDegrees(
+  destination: new Cesium.Rectangle.fromDegrees(
     //Philly
     -75.280266,
     39.867004,

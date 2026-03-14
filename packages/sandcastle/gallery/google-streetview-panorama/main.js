@@ -407,5 +407,7 @@ createCityDropdown();
 
 viewer.scene.camera.flyTo({
   duration: 0,
-  destination: Cesium.Rectangle.fromDegrees(...cityRectangles["Los Angeles"]),
+  destination: new Cesium.Rectangle.fromDegrees(
+    ...cityRectangles["Los Angeles"],
+  ),
 });

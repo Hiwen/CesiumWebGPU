@@ -199,7 +199,9 @@ Object.defineProperties(GaussianSplat3DTileContent.prototype, {
    */
   geometryByteLength: {
     get: function () {
-      return 0;
+      return this.gltfPrimitive.attributes.reduce((totalLength, attribute) => {
+        return totalLength + attribute.byteLength;
+      }, 0);
     },
   },
   /**
@@ -211,12 +213,9 @@ Object.defineProperties(GaussianSplat3DTileContent.prototype, {
    */
   texturesByteLength: {
     get: function () {
-      const primitive = this._tileset?.gaussianSplatPrimitive;
-      if (!defined(primitive)) {
-        return 0;
-      }
-      const texture = primitive.gaussianSplatTexture;
-      const selectedTileLength = primitive.selectedTileLength;
+      const texture = this._tileset.gaussianSplatPrimitive.gaussianSplatTexture;
+      const selectedTileLength =
+        this._tileset.gaussianSplatPrimitive.selectedTileLength;
       if (!defined(texture) || selectedTileLength === 0) {
         return 0;
       }
@@ -799,6 +798,14 @@ GaussianSplat3DTileContent.prototype.isDestroyed = function () {
  */
 GaussianSplat3DTileContent.prototype.destroy = function () {
   this.splatPrimitive = undefined;
+
+  if (
+    defined(this._tileset.gaussianSplatPrimitive) &&
+    !this._tileset.gaussianSplatPrimitive.isDestroyed()
+  ) {
+    this._tileset.gaussianSplatPrimitive.destroy();
+  }
+  this._tileset.gaussianSplatPrimitive = undefined;
 
   this._tile = undefined;
   this._tileset = undefined;

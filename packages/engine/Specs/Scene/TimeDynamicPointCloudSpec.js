@@ -430,7 +430,7 @@ describe(
     });
 
     it("sets clipping planes", function () {
-      const modelMatrix = Transforms.headingPitchRollToFixedFrame(
+      const modelMatrix = new Transforms.headingPitchRollToFixedFrame(
         center,
         new HeadingPitchRoll(0, 0, 0),
       );

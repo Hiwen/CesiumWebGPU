@@ -157,13 +157,11 @@ Batch.prototype.update = function (time) {
         this.material,
       );
 
-      const AppearanceType = this.appearanceType;
-
       primitive = new GroundPrimitive({
         show: false,
         asynchronous: true,
         geometryInstances: geometries.slice(),
-        appearance: new AppearanceType({
+        appearance: new this.appearanceType({
           material: this.material,
           // translucent and closed properties overridden
         }),

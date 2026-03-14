@@ -425,7 +425,7 @@ WallOutlineGeometry.createGeometry = function (wallGeometry) {
     attributes: attributes,
     indices: indices,
     primitiveType: PrimitiveType.LINES,
-    boundingSphere: BoundingSphere.fromVertices(positions),
+    boundingSphere: new BoundingSphere.fromVertices(positions),
   });
 };
 export default WallOutlineGeometry;
