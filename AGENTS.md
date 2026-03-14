@@ -112,8 +112,7 @@
 - 第三阶段：性能优化（延迟渲染、聚类光照）
 
 ### 6.2 特性降级
-- 检测WebGPU支持，不支持时可回退到WebGL
-- 实现特性检测和动态降级
+- 检测WebGPU支持，不支持时提示用户，不做webgl兼容
 
 ## 七、测试策略
 
@@ -131,23 +130,7 @@
 
 ### 8.1 代码组织
 
-CesiumWebGPU/
-├── Source/
-│   ├── Core/              # 核心工具类
-│   ├── Renderer/          # WebGPU渲染器
-│   │   ├── WebGPUContext.js
-│   │   ├── Pipeline/      # 管线管理
-│   │   ├── Shader/        # 着色器管理
-│   │   ├── Command/       # 命令系统
-│   │   └── Resource/      # 资源管理
-│   ├── Scene/             # 场景相关
-│   ├── Primitives/        # 实体和图元
-│   ├── Models/            # 模型加载
-│   └── DataSources/       # 数据源
-├── Shaders/               # WGSL着色器
-├── Spec/                  # 测试
-└── Build/                 # 构建配置
-
+根据现有的仓库结构，自行组织
 
 ### 8.2 命名规范
 - WebGPU相关类使用WebGPU前缀
@@ -164,9 +147,11 @@ CesiumWebGPU/
 ### WebGPU文档
 - [WebGPU Specification](https://gpuweb.github.io/gpuweb/)
 - [WebGPU Shader Language (WGSL)](https://gpuweb.github.io/gpuweb/wgsl/)
-- [WebGPU Samples](https://github.com/webgpuweb/webgpu-samples)
+- [WebGPU Samples](https://github.com/webgpu/webgpu-samples)
 
 ### Cesium源码参考
+
+- [Cesium Source Code](https://github.com/CesiumGS/cesium)
 - WebGL渲染器实现
 - 着色器源码
 - 命令系统
@@ -178,25 +163,25 @@ CesiumWebGPU/
 
 ## 十、里程碑计划
 
-### Phase 1: 基础渲染 (2-3个月)
+### Phase 1: 基础渲染 
 - [ ] WebGPU上下文创建
 - [ ] 基础着色器编译系统
 - [ ] Entity渲染
 - [ ] Globe渲染
 
-### Phase 2: 高级特性 (2-3个月)
+### Phase 2: 高级特性 
 - [ ] 3D Tiles支持
 - [ ] GLB/GLTF模型
 - [ ] 影像和DEM
 - [ ] 相机控制
 
-### Phase 3: 性能优化 (2-3个月)
+### Phase 3: 性能优化 
 - [ ] 延迟渲染
 - [ ] 光照优化
 - [ ] 内存优化
 - [ ] 多线程
 
-### Phase 4: 稳定和测试 (1-2个月)
+### Phase 4: 稳定和测试
 - [ ] 功能完整测试
 - [ ] 性能基准测试
 - [ ] 文档完善
