@@ -130,7 +130,7 @@ const UNIFORM_BUFFER_SIZE = 256; // bytes, padded to device alignment
  * @constructor
  * @private
  *
- * @param {import("./WebGPUContext.js").default} context
+ * @param {WebGPUContext} context
  */
 function WebGPUGlobePass(context) {
   this._context = context;
@@ -153,7 +153,7 @@ function WebGPUGlobePass(context) {
 /**
  * Asynchronously initialises the globe pass.
  *
- * @param {import("./WebGPUContext.js").default} context
+ * @param {WebGPUContext} context
  * @param {ImageBitmap|HTMLImageElement|HTMLCanvasElement|OffscreenCanvas} imageSource
  *   Equirectangular Earth imagery.
  * @returns {Promise<WebGPUGlobePass>}

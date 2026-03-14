@@ -11,7 +11,7 @@ import destroyObject from "../../Core/destroyObject.js";
  * @constructor
  * @private
  *
- * @param {import("./WebGPUContext.js").default} context
+ * @param {WebGPUContext} context
  */
 function WebGPUShaderCache(context) {
   this._context = context;
@@ -44,7 +44,7 @@ WebGPUShaderCache.prototype.getShaderModule = function (key, wgslCode) {
  * cache key, or `undefined` if no matching program has been cached yet.
  *
  * @param {string} key
- * @returns {import("./WebGPUShaderProgram.js").default|undefined}
+ * @returns {WebGPUShaderProgram|undefined}
  */
 WebGPUShaderCache.prototype.getShaderProgram = function (key) {
   return this._programs.get(key);
@@ -54,7 +54,7 @@ WebGPUShaderCache.prototype.getShaderProgram = function (key) {
  * Stores a compiled {@link WebGPUShaderProgram} under the given key.
  *
  * @param {string} key
- * @param {import("./WebGPUShaderProgram.js").default} program
+ * @param {WebGPUShaderProgram} program
  */
 WebGPUShaderCache.prototype.setShaderProgram = function (key, program) {
   this._programs.set(key, program);

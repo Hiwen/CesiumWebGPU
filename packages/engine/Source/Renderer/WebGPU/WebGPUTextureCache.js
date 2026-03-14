@@ -18,7 +18,7 @@ function WebGPUTextureCache() {
  * Gets a cached texture by key.
  *
  * @param {string} key
- * @returns {import("./WebGPUTexture.js").default|undefined}
+ * @returns {WebGPUTexture|undefined}
  */
 WebGPUTextureCache.prototype.getTexture = function (key) {
   const entry = this._textures.get(key);
@@ -33,7 +33,7 @@ WebGPUTextureCache.prototype.getTexture = function (key) {
  * Adds a texture to the cache.
  *
  * @param {string} key
- * @param {import("./WebGPUTexture.js").default} texture
+ * @param {WebGPUTexture} texture
  */
 WebGPUTextureCache.prototype.addTexture = function (key, texture) {
   this._textures.set(key, { texture, count: 1 });

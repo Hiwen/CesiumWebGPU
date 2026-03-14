@@ -14,9 +14,9 @@ import PrimitiveType from "../../Core/PrimitiveType.js";
  * @private
  *
  * @param {object} options
- * @param {import("./WebGPURenderPipeline.js").default} options.renderPipeline
- * @param {import("./WebGPUVertexArray.js").default} [options.vertexArray]
- * @param {Array<{index: number, bindGroup: import("./WebGPUBindGroup.js").default}>} [options.bindGroups]
+ * @param {WebGPURenderPipeline} options.renderPipeline
+ * @param {WebGPUVertexArray} [options.vertexArray]
+ * @param {Array<{index: number, bindGroup: WebGPUBindGroup}>} [options.bindGroups]
  *   Bind groups to set before the draw call; each entry has `index` and `bindGroup`.
  * @param {number}  [options.count]          Number of vertices/indices.
  * @param {number}  [options.offset=0]       First vertex/index offset.
@@ -59,7 +59,7 @@ Object.defineProperties(WebGPUDrawCommand.prototype, {
   /**
    * The render pipeline for this command.
    * @memberof WebGPUDrawCommand.prototype
-   * @type {import("./WebGPURenderPipeline.js").default}
+   * @type {WebGPURenderPipeline}
    */
   renderPipeline: {
     get: function () {
@@ -73,7 +73,7 @@ Object.defineProperties(WebGPUDrawCommand.prototype, {
   /**
    * The vertex array providing geometry data.
    * @memberof WebGPUDrawCommand.prototype
-   * @type {import("./WebGPUVertexArray.js").default|undefined}
+   * @type {WebGPUVertexArray|undefined}
    */
   vertexArray: {
     get: function () {
@@ -87,7 +87,7 @@ Object.defineProperties(WebGPUDrawCommand.prototype, {
   /**
    * Bind groups to be set before drawing.
    * @memberof WebGPUDrawCommand.prototype
-   * @type {Array<{index: number, bindGroup: import("./WebGPUBindGroup.js").default}>}
+   * @type {Array<{index: number, bindGroup: WebGPUBindGroup}>}
    */
   bindGroups: {
     get: function () {

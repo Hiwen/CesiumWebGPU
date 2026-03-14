@@ -34,7 +34,7 @@ Object.defineProperties(WebGPURenderPassEncoder.prototype, {
 /**
  * Executes a Cesium {@link WebGPUDrawCommand} against this pass.
  *
- * @param {import("./WebGPUDrawCommand.js").default} drawCommand
+ * @param {WebGPUDrawCommand} drawCommand
  */
 WebGPURenderPassEncoder.prototype.executeDrawCommand = function (drawCommand) {
   drawCommand.execute(this._passEncoder);
@@ -59,7 +59,7 @@ WebGPURenderPassEncoder.prototype.end = function () {
  * @constructor
  * @private
  *
- * @param {import("./WebGPUContext.js").default} context
+ * @param {WebGPUContext} context
  */
 function WebGPUCommandEncoder(context) {
   //>>includeStart('debug', pragmas.debug);
@@ -99,8 +99,7 @@ Object.defineProperties(WebGPUCommandEncoder.prototype, {
 WebGPUCommandEncoder.prototype.beginRenderPass = function (options) {
   options = options ?? {};
 
-  const colorView =
-    options.colorView ?? this._context.getCurrentTextureView();
+  const colorView = options.colorView ?? this._context.getCurrentTextureView();
 
   const clearColor = options.clearColor ?? { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
   const loadOp = options.loadOp ?? "clear";

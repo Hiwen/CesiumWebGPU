@@ -38,7 +38,7 @@ const WebGPUBufferUsage = Object.freeze({
  * @private
  *
  * @param {object} options
- * @param {import("./WebGPUContext.js").default} options.context
+ * @param {WebGPUContext} options.context
  * @param {number}     [options.sizeInBytes]   Byte size when `typedArray` is absent.
  * @param {TypedArray} [options.typedArray]    Initial data; size is inferred.
  * @param {number}     options.usage           One of the `WebGPUBufferUsage` flag combinations.
@@ -110,7 +110,7 @@ function WebGPUBuffer(options) {
  * Creates a vertex buffer, optionally pre-filled with `typedArray`.
  *
  * @param {object} options
- * @param {import("./WebGPUContext.js").default} options.context
+ * @param {WebGPUContext} options.context
  * @param {TypedArray} [options.typedArray]
  * @param {number}     [options.sizeInBytes]
  * @param {string}     [options.label]
@@ -127,7 +127,7 @@ WebGPUBuffer.createVertexBuffer = function (options) {
  * Creates an index buffer, optionally pre-filled with `typedArray`.
  *
  * @param {object} options
- * @param {import("./WebGPUContext.js").default} options.context
+ * @param {WebGPUContext} options.context
  * @param {TypedArray} [options.typedArray]
  * @param {number}     [options.sizeInBytes]
  * @param {string}     [options.label]
@@ -144,7 +144,7 @@ WebGPUBuffer.createIndexBuffer = function (options) {
  * Creates a uniform buffer of the given byte size.
  *
  * @param {object} options
- * @param {import("./WebGPUContext.js").default} options.context
+ * @param {WebGPUContext} options.context
  * @param {number}     options.sizeInBytes
  * @param {TypedArray} [options.typedArray]
  * @param {string}     [options.label]

@@ -889,7 +889,7 @@ Object.defineProperties(Scene.prototype, {
    * becomes available.
    *
    * @memberof Scene.prototype
-   * @type {import("../Renderer/WebGPU/WebGPURenderer.js").default|undefined}
+   * @type {object|undefined}
    * @readonly
    */
   webGPURenderer: {
@@ -5364,10 +5364,7 @@ Scene.prototype.destroy = function () {
     this._webGPUResizeObserver.disconnect();
     this._webGPUResizeObserver = undefined;
   }
-  if (
-    defined(this._webGPUCanvas) &&
-    defined(this._webGPUCanvas.parentNode)
-  ) {
+  if (defined(this._webGPUCanvas) && defined(this._webGPUCanvas.parentNode)) {
     this._webGPUCanvas.parentNode.removeChild(this._webGPUCanvas);
   }
   this._webGPUCanvas = undefined;

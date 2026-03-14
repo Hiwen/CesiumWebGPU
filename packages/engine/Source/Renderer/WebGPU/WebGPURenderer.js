@@ -183,7 +183,7 @@ WebGPURenderer.prototype.beginFrame = function (clearColor) {
  *
  * @param {object} [options]
  * @param {{r:number,g:number,b:number,a:number}} [options.clearColor]  Clear color.
- * @returns {import("./WebGPUCommandEncoder.js").WebGPURenderPassEncoder}
+ * @returns {WebGPURenderPassEncoder}
  */
 WebGPURenderer.prototype.beginOpaquePass = function (options) {
   options = options ?? {};
@@ -207,7 +207,7 @@ WebGPURenderer.prototype.beginOpaquePass = function (options) {
  * Begins a translucent render pass that *loads* (does not clear) the color
  * attachment so opaque content rendered previously is preserved.
  *
- * @returns {import("./WebGPUCommandEncoder.js").WebGPURenderPassEncoder}
+ * @returns {WebGPURenderPassEncoder}
  */
 WebGPURenderer.prototype.beginTranslucentPass = function () {
   return this._frameCommandEncoder.beginRenderPass({

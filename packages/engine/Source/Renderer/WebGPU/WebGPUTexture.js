@@ -11,14 +11,18 @@ import PixelDatatype from "../PixelDatatype.js";
  * Maps a Cesium {@link PixelFormat} to a WebGPU texture format string.
  *
  * @param {PixelFormat} pixelFormat
- * @param {import("../PixelDatatype.js").default} pixelDatatype
+ * @param {PixelDatatype} pixelDatatype
  * @returns {string} GPUTextureFormat
  */
 function getGPUTextureFormat(pixelFormat, pixelDatatype) {
   switch (pixelFormat) {
     case PixelFormat.RGBA:
-      if (pixelDatatype === PixelDatatype.FLOAT) return "rgba32float";
-      if (pixelDatatype === PixelDatatype.HALF_FLOAT) return "rgba16float";
+      if (pixelDatatype === PixelDatatype.FLOAT) {
+        return "rgba32float";
+      }
+      if (pixelDatatype === PixelDatatype.HALF_FLOAT) {
+        return "rgba16float";
+      }
       return "rgba8unorm";
     case PixelFormat.RGB:
       // WebGPU has no rgb8unorm; use rgba8unorm and ignore alpha
@@ -46,7 +50,7 @@ function getGPUTextureFormat(pixelFormat, pixelDatatype) {
  * @private
  *
  * @param {object} options
- * @param {import("./WebGPUContext.js").default} options.context
+ * @param {WebGPUContext} options.context
  * @param {number}   [options.width]       Pixel width (required if no `source`).
  * @param {number}   [options.height]      Pixel height (required if no `source`).
  * @param {number}   [options.depth=1]     Depth layers (for 3-D textures).
@@ -93,8 +97,7 @@ function WebGPUTexture(options) {
     options.format ??
     getGPUTextureFormat(options.pixelFormat, options.pixelDatatype);
 
-  const isDepthFormat =
-    format.includes("depth") || format.includes("stencil");
+  const isDepthFormat = format.includes("depth") || format.includes("stencil");
   // WebGPU GPUTextureUsage flags (numeric values from the spec):
   // TEXTURE_BINDING=0x04, COPY_DST=0x02, RENDER_ATTACHMENT=0x10
   const usage = isDepthFormat

@@ -43,10 +43,10 @@ function toGPUPrimitiveTopology(primitiveType) {
  * @private
  *
  * @param {object} options
- * @param {import("./WebGPUContext.js").default} options.context
- * @param {import("./WebGPUShaderProgram.js").default} options.shaderProgram
+ * @param {WebGPUContext} options.context
+ * @param {WebGPUShaderProgram} options.shaderProgram
  * @param {GPUPipelineLayout|"auto"} options.layout
- * @param {import("./WebGPUVertexArray.js").default} [options.vertexArray]
+ * @param {WebGPUVertexArray} [options.vertexArray]
  * @param {PrimitiveType} [options.primitiveType=PrimitiveType.TRIANGLES]
  * @param {object} [options.renderState]   Cesium RenderState descriptor.
  * @param {string} options.colorFormat     Colour attachment texture format.
@@ -65,8 +65,7 @@ function WebGPURenderPipeline(options) {
   const context = options.context;
   const shaderProgram = options.shaderProgram;
   const renderState = options.renderState ?? {};
-  const primitiveType =
-    options.primitiveType ?? PrimitiveType.TRIANGLES;
+  const primitiveType = options.primitiveType ?? PrimitiveType.TRIANGLES;
   const label = options.label ?? "RenderPipeline";
   const colorFormat = options.colorFormat;
   const depthFormat = options.depthFormat;
@@ -81,7 +80,11 @@ function WebGPURenderPipeline(options) {
 
   // Depth/stencil state
   const depthStencil = defined(depthFormat)
-    ? buildDepthStencilState(renderState.depthTest, renderState.depthMask, depthFormat)
+    ? buildDepthStencilState(
+        renderState.depthTest,
+        renderState.depthMask,
+        depthFormat,
+      )
     : undefined;
 
   const descriptor = {

@@ -53,7 +53,7 @@ function getGPUVertexFormat(componentDatatype, componentsPerAttribute) {
  * @private
  *
  * @param {object} options
- * @param {import("./WebGPUContext.js").default} options.context
+ * @param {WebGPUContext} options.context
  * @param {Array<WebGPUVertexArrayAttribute>} [options.attributes=[]]
  *   Vertex attribute descriptors.
  * @param {WebGPUBuffer} [options.indexBuffer]  Optional index buffer.
@@ -94,7 +94,7 @@ function WebGPUVertexArray(options) {
 
 /**
  * @typedef {object} WebGPUVertexArrayAttribute
- * @property {WebGPUBuffer} vertexBuffer         The source GPU buffer.
+ * @property {object} vertexBuffer         The source GPU buffer ({@link WebGPUBuffer}).
  * @property {number}       shaderLocation        The `@location(n)` binding in the vertex shader.
  * @property {number}       componentsPerAttribute 1–4.
  * @property {ComponentDatatype} componentDatatype Cesium component type.
@@ -146,7 +146,7 @@ Object.defineProperties(WebGPUVertexArray.prototype, {
   /**
    * The optional index buffer.
    * @memberof WebGPUVertexArray.prototype
-   * @type {WebGPUBuffer|undefined}
+   * @type {object|undefined}
    */
   indexBuffer: {
     get: function () {

@@ -2,7 +2,6 @@ import Check from "../../Core/Check.js";
 import createGuid from "../../Core/createGuid.js";
 import defined from "../../Core/defined.js";
 import destroyObject from "../../Core/destroyObject.js";
-import DeveloperError from "../../Core/DeveloperError.js";
 import RuntimeError from "../../Core/RuntimeError.js";
 import WebGPUShaderCache from "./WebGPUShaderCache.js";
 import WebGPUTextureCache from "./WebGPUTextureCache.js";
@@ -122,7 +121,10 @@ function WebGPUContext(canvas, adapter, device, options) {
 
   // Error handling: surface uncaptured GPU errors to the console.
   device.addEventListener("uncapturederror", (event) => {
-    console.error("[WebGPU] Uncaptured error:", event.error.message ?? event.error);
+    console.error(
+      "[WebGPU] Uncaptured error:",
+      event.error.message ?? event.error,
+    );
   });
 
   // Logging flags (mirrors Context API)
@@ -383,7 +385,7 @@ WebGPUContext.prototype.getCurrentTextureView = function () {
  * Creates and assigns a pick ID, mirroring {@link Context#createPickId}.
  *
  * @param {object} object
- * @returns {{ color: import("../../Core/Color").default, destroy: function }}
+ * @returns {{ color: Color, destroy: function }}
  */
 WebGPUContext.prototype.createPickId = function (object) {
   //>>includeStart('debug', pragmas.debug);

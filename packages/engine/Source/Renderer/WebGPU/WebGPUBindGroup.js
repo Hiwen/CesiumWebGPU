@@ -13,7 +13,7 @@ import destroyObject from "../../Core/destroyObject.js";
  * @private
  *
  * @param {object} options
- * @param {import("./WebGPUContext.js").default} options.context
+ * @param {WebGPUContext} options.context
  * @param {GPUBindGroupLayout} options.layout   The layout this group conforms to.
  * @param {GPUBindGroupEntry[]} options.entries  The resource entries.
  * @param {string} [options.label]

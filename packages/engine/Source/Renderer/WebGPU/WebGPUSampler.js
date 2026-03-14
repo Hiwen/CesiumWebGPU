@@ -53,7 +53,7 @@ function toGPUMinFilter(minFilter) {
  * @private
  *
  * @param {object} options
- * @param {import("./WebGPUContext.js").default} options.context
+ * @param {WebGPUContext} options.context
  * @param {TextureWrap}             [options.wrapS=TextureWrap.CLAMP_TO_EDGE]
  * @param {TextureWrap}             [options.wrapT=TextureWrap.CLAMP_TO_EDGE]
  * @param {TextureWrap}             [options.wrapR=TextureWrap.CLAMP_TO_EDGE]

@@ -16,7 +16,7 @@ let nextProgramId = 0;
  * @private
  *
  * @param {object} options
- * @param {import("./WebGPUContext.js").default} options.context
+ * @param {WebGPUContext} options.context
  * @param {string} options.vertexShaderWGSL     WGSL source for the vertex stage.
  * @param {string} options.fragmentShaderWGSL   WGSL source for the fragment stage.
  * @param {string} [options.vertexEntryPoint="vertexMain"]   Vertex entry-point name.
