@@ -1,6 +1,7 @@
 import Check from "../../Core/Check.js";
 import defined from "../../Core/defined.js";
 import destroyObject from "../../Core/destroyObject.js";
+import JulianDate from "../../Core/JulianDate.js";
 import RuntimeError from "../../Core/RuntimeError.js";
 import WebGPUContext, { isWebGPUSupported } from "./WebGPUContext.js";
 import WebGPUCommandEncoder from "./WebGPUCommandEncoder.js";
@@ -29,8 +30,15 @@ const _uniformScratch = new Float32Array(36);
  * @private
  *
  * @param {WebGPUContext} context
+ * @param {object} [options]
+ * @param {Clock} [options.clock]  An optional Cesium {@link Clock} to drive
+ *   simulation time.  When provided the renderer calls {@link Clock#tick} on
+ *   every frame and uses the resulting {@link JulianDate} to compute the
+ *   `time` shader uniform (seconds since `clock.startTime`).  When omitted
+ *   `performance.now()` is used as before.
  */
-function WebGPURenderer(context) {
+function WebGPURenderer(context, options) {
+  options = options ?? {};
   this._context = context;
   this._depthTexture = undefined;
   this._depthView = undefined;
@@ -39,6 +47,14 @@ function WebGPURenderer(context) {
   this._frameCommandEncoder = undefined;
   this._rafId = undefined;
   this._destroyed = false;
+
+  /**
+   * Optional Cesium {@link Clock} used to drive simulation time.
+   * When set the renderer ticks the clock every frame and derives the
+   * `time` shader uniform from `JulianDate.secondsDifference(currentTime, startTime)`.
+   * @type {Clock|undefined}
+   */
+  this.clock = options.clock ?? undefined;
 
   // Execute render-command lists accumulated during scene traversal.
   this._opaqueCommandList = [];
@@ -74,7 +90,11 @@ function WebGPURenderer(context) {
  * once per canvas and store the result.
  *
  * @param {HTMLCanvasElement} canvas
- * @param {object} [options]   Forwarded to {@link WebGPUContext.create}.
+ * @param {object} [options]
+ * @param {Clock} [options.clock]  Optional Cesium {@link Clock} to drive
+ *   simulation time.  Forwarded to the renderer constructor.
+ * @param {object} [options.webgpu]  Additional options forwarded to
+ *   {@link WebGPUContext.create}.
  * @returns {Promise<WebGPURenderer>}
  *
  * @throws {RuntimeError} If the browser does not support WebGPU.
@@ -91,8 +111,9 @@ WebGPURenderer.create = async function (canvas, options) {
     );
   }
 
-  const context = await WebGPUContext.create(canvas, options);
-  return new WebGPURenderer(context);
+  options = options ?? {};
+  const context = await WebGPUContext.create(canvas, options.webgpu ?? options);
+  return new WebGPURenderer(context, options);
 };
 
 // ─── Properties ───────────────────────────────────────────────────────────────
@@ -292,7 +313,15 @@ WebGPURenderer.prototype.renderGlobePass = function (uniformOverride) {
     _uniformScratch[32] = sun[0];
     _uniformScratch[33] = sun[1];
     _uniformScratch[34] = sun[2];
-    _uniformScratch[35] = performance.now() * 0.001;
+    // Use clock simulation time when available, otherwise wall-clock time.
+    if (defined(this.clock)) {
+      _uniformScratch[35] = JulianDate.secondsDifference(
+        this.clock.currentTime,
+        this.clock.startTime,
+      );
+    } else {
+      _uniformScratch[35] = performance.now() * 0.001;
+    }
     uniforms = { uniformArray: _uniformScratch };
   }
 
@@ -335,6 +364,11 @@ WebGPURenderer.prototype.startRenderLoop = function () {
   function frame() {
     if (self._destroyed) {
       return;
+    }
+    // Tick the simulation clock (if provided) before rendering so the time
+    // uniform reflects the latest simulated time.
+    if (defined(self.clock)) {
+      self.clock.tick();
     }
     // Apply inertia / ongoing gestures before computing the camera matrices.
     if (defined(self.cameraController)) {

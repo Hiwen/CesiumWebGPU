@@ -28,9 +28,36 @@ canvas:active{cursor:grabbing}
 .badge-webgpu{background:rgba(0,180,100,.22);border:1px solid rgba(0,220,120,.5);color:#0fa}
 .badge-webgl {background:rgba(80,130,255,.22);border:1px solid rgba(80,130,255,.5);color:#8af}
 #status{
-  position:absolute;bottom:8px;left:0;right:0;text-align:center;
-  font-size:10px;color:#468;letter-spacing:.5px;
+  position:absolute;top:8px;left:0;right:0;text-align:center;
+  font-size:10px;color:#468;letter-spacing:.5px;pointer-events:none;
 }
+/* ── Timeline ── */
+#timeline{
+  width:100%;background:linear-gradient(to top,rgba(0,0,0,.88) 0%,rgba(0,8,24,.72) 100%);
+  border-top:1px solid rgba(0,160,255,.35);
+  font-family:"Segoe UI",Arial,sans-serif;user-select:none;-webkit-user-select:none;
+  margin-top:6px;
+}
+#tl-controls{display:flex;align-items:center;gap:6px;padding:5px 10px 3px}
+.tl-btn{
+  background:rgba(0,60,120,.7);border:1px solid rgba(0,160,255,.4);
+  color:#7cf;border-radius:4px;cursor:pointer;font-size:14px;line-height:1;padding:3px 7px;
+  transition:background .15s;flex-shrink:0;
+}
+.tl-btn:hover{background:rgba(0,100,200,.8)}
+.tl-btn.active{background:rgba(0,140,255,.5);border-color:rgba(0,220,255,.7);color:#0ff}
+#tl-date{flex:1;text-align:center;font-size:11px;color:#8df;letter-spacing:.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#tl-speed-wrap{display:flex;align-items:center;gap:4px;font-size:10px;color:#68a;flex-shrink:0}
+#tl-speed-wrap input[type=range]{width:70px;cursor:pointer;accent-color:#08f}
+#tl-speed-label{min-width:52px;color:#8df;font-size:10px;text-align:right}
+#tl-scrubber{
+  position:relative;height:18px;margin:0 10px 6px;cursor:pointer;
+  background:rgba(0,30,80,.6);border:1px solid rgba(0,100,200,.4);border-radius:3px;overflow:hidden;
+}
+#tl-track{position:absolute;top:0;left:0;height:100%;width:0%;background:linear-gradient(to right,rgba(0,120,255,.5),rgba(0,200,255,.35));pointer-events:none}
+#tl-needle{position:absolute;top:0;bottom:0;width:2px;background:#0af;box-shadow:0 0 4px #0af;pointer-events:none;transform:translateX(-50%)}
+#tl-start{position:absolute;top:2px;left:4px;font-size:9px;color:#468;pointer-events:none}
+#tl-end{position:absolute;top:2px;right:4px;font-size:9px;color:#468;pointer-events:none}
 </style>
 </head>
 <body>
@@ -41,11 +68,32 @@ canvas:active{cursor:grabbing}
     </span>
   </div>
   <div id="canvas-wrap">
-    <canvas id="c" width="660" height="660"></canvas>
+    <canvas id="c" width="660" height="620"></canvas>
     <div id="api-badge" class="badge-webgpu">WebGPU</div>
     <div id="status">Initialising…</div>
   </div>
-  <div id="info">Drag to orbit · Scroll to zoom · Phase 2 rendering pipeline active</div>
+  <!-- Timeline widget (Cesium-compatible clock UI) -->
+  <div id="timeline" style="width:660px">
+    <div id="tl-controls">
+      <button class="tl-btn" id="tl-first" title="Jump to start">⏮</button>
+      <button class="tl-btn" id="tl-prev"  title="Step backward">⏪</button>
+      <button class="tl-btn" id="tl-play"  title="Play / Pause">▶</button>
+      <button class="tl-btn" id="tl-next"  title="Step forward">⏩</button>
+      <button class="tl-btn" id="tl-last"  title="Jump to end">⏭</button>
+      <span id="tl-date">--</span>
+      <div id="tl-speed-wrap">
+        <span id="tl-speed-label">1d/s</span>
+        <input type="range" id="tl-speed" min="0" max="9" step="1" value="3">
+      </div>
+    </div>
+    <div id="tl-scrubber">
+      <div id="tl-track"></div>
+      <div id="tl-needle"></div>
+      <span id="tl-start"></span>
+      <span id="tl-end"></span>
+    </div>
+  </div>
+  <div id="info">Drag to orbit · Scroll to zoom · Timeline controls active</div>
 </div>
 <script>
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -68,6 +116,125 @@ const canvas = document.getElementById("c");
 const badge  = document.getElementById("api-badge");
 const st     = document.getElementById("status");
 const W = canvas.width, H = canvas.height;
+
+// ── Simulation Clock (mirrors Cesium.Clock API) ───────────────────────────────
+// Default range: 2024-01-01 → 2025-01-01 at 1 day/second.
+const CLOCK_START_MS = Date.UTC(2024, 0, 1);
+const CLOCK_STOP_MS  = Date.UTC(2025, 0, 1);
+const SPEED_STEPS    = [
+  -(86400*365), // -1yr/s
+  -86400,       // -1d/s
+  -3600,        // -1h/s
+  -60,          // -1min/s
+  -1,           // -1x real time
+  1,            //  1x real time
+  60,           //  1min/s
+  3600,         //  1h/s
+  86400,        //  1d/s
+  86400*365,    //  1yr/s
+];
+
+const clock = {
+  startMs:       CLOCK_START_MS,
+  stopMs:        CLOCK_STOP_MS,
+  currentMs:     CLOCK_START_MS,
+  multiplier:    86400,   // sim-seconds advanced per real second  (1 day/s)
+  shouldAnimate: true,
+  _lastRealMs:   performance.now(),
+  tick() {
+    if (!this.shouldAnimate) { this._lastRealMs = performance.now(); return; }
+    const now    = performance.now();
+    const dtReal = (now - this._lastRealMs) / 1000; // real seconds elapsed
+    this._lastRealMs = now;
+    this.currentMs  += dtReal * this.multiplier * 1000;
+    // Loop within [startMs, stopMs]
+    const span = this.stopMs - this.startMs;
+    if (span > 0) {
+      if (this.multiplier >= 0 && this.currentMs > this.stopMs)  this.currentMs = this.startMs;
+      if (this.multiplier <  0 && this.currentMs < this.startMs) this.currentMs = this.stopMs;
+    }
+  },
+  /** Seconds of simulation time since startTime (used as the shader `time` uniform). */
+  get simSeconds() { return (this.currentMs - this.startMs) / 1000; },
+};
+
+// ── Timeline UI wiring ────────────────────────────────────────────────────────
+function _fmtDate(ms) {
+  const d = new Date(ms), p = n => String(n).padStart(2,'0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+}
+function _fmtSpeed(m) {
+  const a=Math.abs(m),s=m<0?'-':'';
+  if(a>=86400*365)return`${s}${(a/(86400*365)).toFixed(0)}yr/s`;
+  if(a>=86400)    return`${s}${(a/86400).toFixed(0)}d/s`;
+  if(a>=3600)     return`${s}${(a/3600).toFixed(0)}h/s`;
+  if(a>=60)       return`${s}${(a/60).toFixed(0)}min/s`;
+  return`${s}${a.toFixed(0)}x`;
+}
+
+const _tlDate    = document.getElementById('tl-date');
+const _tlTrack   = document.getElementById('tl-track');
+const _tlNeedle  = document.getElementById('tl-needle');
+const _tlStart   = document.getElementById('tl-start');
+const _tlEnd     = document.getElementById('tl-end');
+const _tlPlay    = document.getElementById('tl-play');
+const _tlSpeed   = document.getElementById('tl-speed');
+const _tlSpeedLbl= document.getElementById('tl-speed-label');
+const _tlScrubber= document.getElementById('tl-scrubber');
+
+_tlStart.textContent = new Date(clock.startMs).toISOString().slice(0,10);
+_tlEnd.textContent   = new Date(clock.stopMs).toISOString().slice(0,10);
+
+function tlSyncPlayBtn() {
+  if (clock.shouldAnimate) {
+    _tlPlay.textContent='⏸'; _tlPlay.title='Pause'; _tlPlay.classList.add('active');
+  } else {
+    _tlPlay.textContent='▶'; _tlPlay.title='Play';  _tlPlay.classList.remove('active');
+  }
+}
+function tlUpdate() {
+  const span = clock.stopMs - clock.startMs;
+  const frac = span > 0 ? Math.max(0, Math.min(1,(clock.currentMs - clock.startMs)/span)) : 0;
+  const pct  = (frac*100).toFixed(2)+'%';
+  _tlDate.textContent    = _fmtDate(clock.currentMs);
+  _tlTrack.style.width   = pct;
+  _tlNeedle.style.left   = pct;
+  _tlSpeedLbl.textContent= _fmtSpeed(clock.multiplier);
+  tlSyncPlayBtn();
+}
+
+document.getElementById('tl-first').addEventListener('click', ()=>{ clock.currentMs=clock.startMs; tlUpdate(); });
+document.getElementById('tl-last').addEventListener('click',  ()=>{ clock.currentMs=clock.stopMs;  tlUpdate(); });
+document.getElementById('tl-prev').addEventListener('click',  ()=>{ clock.currentMs-=Math.abs(clock.multiplier)*1000; tlUpdate(); });
+document.getElementById('tl-next').addEventListener('click',  ()=>{ clock.currentMs+=Math.abs(clock.multiplier)*1000; tlUpdate(); });
+_tlPlay.addEventListener('click', ()=>{ clock.shouldAnimate=!clock.shouldAnimate; tlSyncPlayBtn(); });
+
+_tlSpeed.addEventListener('input', ()=>{
+  clock.multiplier=SPEED_STEPS[parseInt(_tlSpeed.value,10)];
+  _tlSpeedLbl.textContent=_fmtSpeed(clock.multiplier);
+});
+// Set initial speed slider to match default multiplier (find closest index).
+const _initSpeedIdx = SPEED_STEPS.reduce((best, val, i) =>
+  Math.abs(val - clock.multiplier) < Math.abs(SPEED_STEPS[best] - clock.multiplier) ? i : best, 0);
+_tlSpeed.value = String(_initSpeedIdx);
+_tlSpeedLbl.textContent = _fmtSpeed(clock.multiplier);
+
+let _tlScrubbing = false;
+function tlScrubTo(clientX) {
+  const r=_tlScrubber.getBoundingClientRect();
+  const frac=Math.max(0,Math.min(1,(clientX-r.left)/r.width));
+  clock.currentMs=clock.startMs+frac*(clock.stopMs-clock.startMs);
+  tlUpdate();
+}
+_tlScrubber.addEventListener('mousedown',  e=>{ _tlScrubbing=true;  tlScrubTo(e.clientX); });
+document.addEventListener('mousemove',     e=>{ if(_tlScrubbing) tlScrubTo(e.clientX); });
+document.addEventListener('mouseup',       ()=>{ _tlScrubbing=false; });
+_tlScrubber.addEventListener('touchstart', e=>{ _tlScrubbing=true;  tlScrubTo(e.touches[0].clientX); },{passive:true});
+document.addEventListener('touchmove',     e=>{ if(_tlScrubbing) tlScrubTo(e.touches[0].clientX); },{passive:true});
+document.addEventListener('touchend',      ()=>{ _tlScrubbing=false; });
+
+tlSyncPlayBtn();
+tlUpdate();
 
 // ── Matrix helpers (same for both rendering paths) ────────────────────────────
 const mul = (a,b) => {
@@ -245,10 +412,14 @@ async function runWebGPU() {
   st.textContent="✓ WebGPU · GlobePassVS.wgsl + GlobePassFS.wgsl active";
 
   function frame(){
-    const t=(performance.now()-t0)/1000;
-    const {mvp,mv,lightDirEC}=getCameraUniforms(t);
+    // Advance the simulation clock and update the timeline UI.
+    clock.tick();
+    tlUpdate();
+    const tReal=(performance.now()-t0)/1000; // wall time for auto-rotation
+    const tSim=clock.simSeconds;             // sim time for cloud animation
+    const {mvp,mv,lightDirEC}=getCameraUniforms(tReal);
     const ub=new Float32Array(64);
-    ub.set(mvp,0);ub.set(mv,16);ub[32]=lightDirEC[0];ub[33]=lightDirEC[1];ub[34]=lightDirEC[2];ub[35]=t;
+    ub.set(mvp,0);ub.set(mv,16);ub[32]=lightDirEC[0];ub[33]=lightDirEC[1];ub[34]=lightDirEC[2];ub[35]=tSim;
     device.queue.writeBuffer(ubuf,0,ub);
     const enc=device.createCommandEncoder();
     const pass=enc.beginRenderPass({
@@ -330,11 +501,15 @@ function runWebGL() {
     st.textContent="WebGL active (same visual as WebGPU path)";
 
     function frame(){
-      const t=(performance.now()-t0)/1000;
-      const {mvp,mv,lightDirEC}=getCameraUniforms(t);
+      // Advance the simulation clock and update the timeline UI.
+      clock.tick();
+      tlUpdate();
+      const tReal=(performance.now()-t0)/1000;
+      const tSim=clock.simSeconds;
+      const {mvp,mv,lightDirEC}=getCameraUniforms(tReal);
       gl.clearColor(.002,.005,.015,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
       gl.uniformMatrix4fv(uMVP,false,mvp);gl.uniformMatrix4fv(uMV,false,mv);
-      gl.uniform3fv(uL,lightDirEC);gl.uniform1f(uT_u,t);
+      gl.uniform3fv(uL,lightDirEC);gl.uniform1f(uT_u,tSim);
       gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tex);gl.uniform1i(uTex,0);
       gl.drawElements(gl.TRIANGLES,ia.length,gl.UNSIGNED_INT,0);
       requestAnimationFrame(frame);
