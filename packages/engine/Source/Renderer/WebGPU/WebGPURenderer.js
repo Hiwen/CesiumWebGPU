@@ -63,15 +63,10 @@ function _computeSunDirectionEC(julianDate, viewMatrix) {
       _sunPositionECIScratch,
       _sunDirectionECEFScratch,
     );
-    const len =
-      Math.sqrt(
-        _sunDirectionECEFScratch.x * _sunDirectionECEFScratch.x +
-          _sunDirectionECEFScratch.y * _sunDirectionECEFScratch.y +
-          _sunDirectionECEFScratch.z * _sunDirectionECEFScratch.z,
-      ) || 1.0;
-    sx = _sunDirectionECEFScratch.x / len;
-    sy = _sunDirectionECEFScratch.y / len;
-    sz = _sunDirectionECEFScratch.z / len;
+    Cartesian3.normalize(_sunDirectionECEFScratch, _sunDirectionECEFScratch);
+    sx = _sunDirectionECEFScratch.x;
+    sy = _sunDirectionECEFScratch.y;
+    sz = _sunDirectionECEFScratch.z;
   } else {
     // ── 3. Fallback: simple GAST approximation ─────────────────────────────
     // Days since J2000.0
@@ -91,23 +86,28 @@ function _computeSunDirectionEC(julianDate, viewMatrix) {
     const GAST = (280.46061837 + 360.98564736629 * d) * _DEG_TO_RAD;
     const cosG = Math.cos(GAST);
     const sinG = Math.sin(GAST);
-    sx = xECI * cosG + yECI * sinG;
-    sy = -xECI * sinG + yECI * cosG;
-    sz = zECI;
-    const fallbackLen = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1.0;
-    sx /= fallbackLen;
-    sy /= fallbackLen;
-    sz /= fallbackLen;
+    // Rotate ECI → ECEF and store in scratch for normalisation
+    _sunDirectionECEFScratch.x = xECI * cosG + yECI * sinG;
+    _sunDirectionECEFScratch.y = -xECI * sinG + yECI * cosG;
+    _sunDirectionECEFScratch.z = zECI;
+    Cartesian3.normalize(_sunDirectionECEFScratch, _sunDirectionECEFScratch);
+    sx = _sunDirectionECEFScratch.x;
+    sy = _sunDirectionECEFScratch.y;
+    sz = _sunDirectionECEFScratch.z;
   }
 
   // ── 4. ECEF → eye space via upper-left 3 × 3 of column-major viewMatrix ──
   // Column-major layout: element at row r, col c → index c*4+r.
   const v = viewMatrix;
-  const ex = v[0] * sx + v[4] * sy + v[8] * sz;
-  const ey = v[1] * sx + v[5] * sy + v[9] * sz;
-  const ez = v[2] * sx + v[6] * sy + v[10] * sz;
-  const elen = Math.sqrt(ex * ex + ey * ey + ez * ez) || 1.0;
-  return [ex / elen, ey / elen, ez / elen];
+  _sunDirectionECEFScratch.x = v[0] * sx + v[4] * sy + v[8] * sz;
+  _sunDirectionECEFScratch.y = v[1] * sx + v[5] * sy + v[9] * sz;
+  _sunDirectionECEFScratch.z = v[2] * sx + v[6] * sy + v[10] * sz;
+  Cartesian3.normalize(_sunDirectionECEFScratch, _sunDirectionECEFScratch);
+  return [
+    _sunDirectionECEFScratch.x,
+    _sunDirectionECEFScratch.y,
+    _sunDirectionECEFScratch.z,
+  ];
 }
 
 /**
