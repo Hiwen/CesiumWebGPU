@@ -34,6 +34,7 @@ import _WebGPURenderer from "./WebGPURenderer.js";
 import _WebGPUGlobePass from "./WebGPUGlobePass.js";
 import _WebGPUCamera from "./WebGPUCamera.js";
 import _WebGPUCameraController from "./WebGPUCameraController.js";
+import _WebGPUTimeline from "./WebGPUTimeline.js";
 
 // Named exports (preferred for tree-shaking)
 export {
@@ -58,6 +59,7 @@ export {
   _WebGPUGlobePass as WebGPUGlobePass,
   _WebGPUCamera as WebGPUCamera,
   _WebGPUCameraController as WebGPUCameraController,
+  _WebGPUTimeline as WebGPUTimeline,
 };
 
 /**
@@ -87,6 +89,7 @@ const WebGPUModules = {
   WebGPUGlobePass: _WebGPUGlobePass,
   WebGPUCamera: _WebGPUCamera,
   WebGPUCameraController: _WebGPUCameraController,
+  WebGPUTimeline: _WebGPUTimeline,
 };
 
 export default WebGPUModules;

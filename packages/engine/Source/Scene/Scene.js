@@ -179,7 +179,7 @@ function Scene(options) {
     webgpuCanvas.width = canvas.width;
     webgpuCanvas.height = canvas.height;
     webgpuCanvas.style.cssText =
-      "position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;";
+      "position:absolute;top:0;left:0;width:100%;height:100%;";
     const container = canvas.parentNode;
     if (defined(container)) {
       const pos = window.getComputedStyle
@@ -4834,7 +4834,28 @@ function render(scene) {
   // WebGPURenderer.startRenderLoop()) handles all drawing.  We skip the
   // WebGL rendering pass entirely so the hidden WebGL canvas does not waste
   // GPU bandwidth drawing content that is never visible.
+  //
+  // We also thread the Cesium simulation time (from the clock that was
+  // already ticked by CesiumWidget.render before this call) into the WebGPU
+  // renderer so the globe's cloud-animation shader uniform reflects the
+  // actual simulation time rather than wall-clock performance.now().
   if (scene._webGPUReady && defined(scene._webGPURenderer)) {
+    const renderer = scene._webGPURenderer;
+    // Update the renderer's external simulation time each Cesium frame.
+    // The renderer's own RAF loop reads this value – it does NOT tick any
+    // clock itself (CesiumWidget already did that above).
+    // Use frameState.time (set by updateFrameNumber before this function runs)
+    // rather than the outer Scene.prototype.render `time` parameter which is
+    // not in scope here.
+    renderer.simulationTime = JulianDate.clone(
+      frameState.time,
+      renderer.simulationTime,
+    );
+    if (!defined(renderer.simulationTimeEpoch)) {
+      // Set the epoch once on the first frame to the current time so that
+      // the shader uniform starts at 0 (seconds since session start).
+      renderer.simulationTimeEpoch = JulianDate.clone(frameState.time);
+    }
     return;
   }
   // ─────────────────────────────────────────────────────────────────────────
