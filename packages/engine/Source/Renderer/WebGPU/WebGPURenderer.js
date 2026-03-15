@@ -1,8 +1,12 @@
+import Cartesian3 from "../../Core/Cartesian3.js";
 import Check from "../../Core/Check.js";
 import defined from "../../Core/defined.js";
 import destroyObject from "../../Core/destroyObject.js";
 import JulianDate from "../../Core/JulianDate.js";
+import Matrix3 from "../../Core/Matrix3.js";
 import RuntimeError from "../../Core/RuntimeError.js";
+import Simon1994PlanetaryPositions from "../../Core/Simon1994PlanetaryPositions.js";
+import Transforms from "../../Core/Transforms.js";
 import WebGPUContext, { isWebGPUSupported } from "./WebGPUContext.js";
 import WebGPUCommandEncoder from "./WebGPUCommandEncoder.js";
 import WebGPUTexture from "./WebGPUTexture.js";
@@ -12,6 +16,99 @@ import WebGPUCameraController from "./WebGPUCameraController.js";
 
 // Pre-allocated uniform buffer (36 floats: mvp[16] | mv[16] | lightDirEC[3] | time[1])
 const _uniformScratch = new Float32Array(36);
+
+// Pre-allocated scratch objects for sun-direction computation (avoids per-frame GC).
+const _sunPositionECIScratch = new Cartesian3();
+const _sunDirectionECEFScratch = new Cartesian3();
+const _icrfToFixedScratch = new Matrix3();
+
+const _DEG_TO_RAD = Math.PI / 180.0;
+
+/**
+ * Computes the sun direction in eye (camera) space from a {@link JulianDate}.
+ *
+ * Algorithm:
+ *  1. Compute the sun position in the Earth-Centred Inertial (ECI) frame
+ *     via Simon (1994) planetary positions.
+ *  2. Rotate to ECEF using `Transforms.computeIcrfToCentralBodyFixedMatrix`.
+ *     That function falls back to a TEME approximation so it never returns
+ *     `undefined` in practice.
+ *  3. If the rotation matrix is still unavailable (edge case), fall back to a
+ *     simplified GAST-based approximation that requires no external data.
+ *  4. Transform the ECEF unit direction to eye space using the upper-left
+ *     3 × 3 of the column-major `viewMatrix`.
+ *
+ * @param {JulianDate} julianDate
+ * @param {Float32Array} viewMatrix  Column-major 4 × 4 view matrix.
+ * @returns {number[]} Length-3 normalised direction in eye space.
+ * @private
+ */
+function _computeSunDirectionEC(julianDate, viewMatrix) {
+  // ── 1. Sun position in ECI ────────────────────────────────────────────────
+  Simon1994PlanetaryPositions.computeSunPositionInEarthInertialFrame(
+    julianDate,
+    _sunPositionECIScratch,
+  );
+
+  // ── 2. Rotate ECI → ECEF ─────────────────────────────────────────────────
+  let sx, sy, sz;
+  const icrfToFixed = Transforms.computeIcrfToCentralBodyFixedMatrix(
+    julianDate,
+    _icrfToFixedScratch,
+  );
+
+  if (defined(icrfToFixed)) {
+    Matrix3.multiplyByVector(
+      icrfToFixed,
+      _sunPositionECIScratch,
+      _sunDirectionECEFScratch,
+    );
+    const len =
+      Math.sqrt(
+        _sunDirectionECEFScratch.x * _sunDirectionECEFScratch.x +
+          _sunDirectionECEFScratch.y * _sunDirectionECEFScratch.y +
+          _sunDirectionECEFScratch.z * _sunDirectionECEFScratch.z,
+      ) || 1.0;
+    sx = _sunDirectionECEFScratch.x / len;
+    sy = _sunDirectionECEFScratch.y / len;
+    sz = _sunDirectionECEFScratch.z / len;
+  } else {
+    // ── 3. Fallback: simple GAST approximation ─────────────────────────────
+    // Days since J2000.0
+    const d =
+      julianDate.dayNumber - 2451545.0 + julianDate.secondsOfDay / 86400.0;
+    const L = (280.46 + 0.9856474 * d) * _DEG_TO_RAD;
+    const g = (357.528 + 0.9856003 * d) * _DEG_TO_RAD;
+    const lambda = L + (1.915 * Math.sin(g) + 0.02 * Math.sin(2.0 * g)) * _DEG_TO_RAD;
+    const epsilon = (23.439 - 0.0000004 * d) * _DEG_TO_RAD;
+    const cosLambda = Math.cos(lambda);
+    const sinLambda = Math.sin(lambda);
+    // ECI direction
+    const xECI = cosLambda;
+    const yECI = Math.cos(epsilon) * sinLambda;
+    const zECI = Math.sin(epsilon) * sinLambda;
+    // GAST (Greenwich Apparent Sidereal Time)
+    const GAST = (280.46061837 + 360.98564736629 * d) * _DEG_TO_RAD;
+    const cosG = Math.cos(GAST);
+    const sinG = Math.sin(GAST);
+    sx = xECI * cosG + yECI * sinG;
+    sy = -xECI * sinG + yECI * cosG;
+    sz = zECI;
+    const fallbackLen = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1.0;
+    sx /= fallbackLen;
+    sy /= fallbackLen;
+    sz /= fallbackLen;
+  }
+
+  // ── 4. ECEF → eye space via upper-left 3 × 3 of column-major viewMatrix ──
+  // Column-major layout: element at row r, col c → index c*4+r.
+  const v = viewMatrix;
+  const ex = v[0] * sx + v[4] * sy + v[8] * sz;
+  const ey = v[1] * sx + v[5] * sy + v[9] * sz;
+  const ez = v[2] * sx + v[6] * sy + v[10] * sz;
+  const elen = Math.sqrt(ex * ex + ey * ey + ez * ez) || 1.0;
+  return [ex / elen, ey / elen, ez / elen];
+}
 
 /**
  * High-level WebGPU renderer that manages the per-frame rendering loop.
@@ -325,15 +422,31 @@ WebGPURenderer.prototype.renderGlobePass = function (uniformOverride) {
     // Legacy path: caller provides pre-packed array (e.g. old Scene.js hook).
     uniforms = uniformOverride;
   } else {
-    const sun = this.camera.sunDirectionEC();
+    // Determine the current simulation JulianDate once — used for both the
+    // sun direction and the time shader uniform so they stay in sync.
+    // Priority: simulationTime (external, set by Scene.render) > clock > none
+    const hasExternalTime =
+      defined(this.simulationTime) && defined(this.simulationTimeEpoch);
+    let simJD;
+    if (hasExternalTime) {
+      simJD = this.simulationTime;
+    } else if (defined(this.clock)) {
+      simJD = this.clock.currentTime;
+    }
+
+    // Sun direction: time-varying when we have a JulianDate, fixed fallback otherwise.
+    const sun = defined(simJD)
+      ? _computeSunDirectionEC(simJD, this.camera.viewMatrix)
+      : this.camera.sunDirectionEC();
+
     _uniformScratch.set(this.camera.mvpMatrix, 0);
     _uniformScratch.set(this.camera.mvMatrix, 16);
     _uniformScratch[32] = sun[0];
     _uniformScratch[33] = sun[1];
     _uniformScratch[34] = sun[2];
-    // Use clock simulation time when available, otherwise wall-clock time.
-    // Priority: simulationTime (set externally by Scene.render) > clock (self-managed) > performance.now()
-    if (defined(this.simulationTime) && defined(this.simulationTimeEpoch)) {
+    // Time uniform: seconds since epoch.
+    // Priority: simulationTime+epoch (external) > clock > performance.now()
+    if (hasExternalTime) {
       _uniformScratch[35] = JulianDate.secondsDifference(
         this.simulationTime,
         this.simulationTimeEpoch,
