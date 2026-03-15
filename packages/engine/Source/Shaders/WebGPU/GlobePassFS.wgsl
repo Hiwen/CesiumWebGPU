@@ -1,8 +1,11 @@
 // Globe rendering fragment shader — Phase 2
 //
-// Samples real imagery from an equirectangular texture, applies FBM cloud
-// noise (same equations as GlobeFS.wgsl), Blinn-Phong diffuse + specular,
-// and a Fresnel atmospheric rim.
+// Samples real imagery from an equirectangular texture, applies Blinn-Phong
+// diffuse + specular, and a Fresnel atmospheric rim.
+//
+// Cloud rendering has been moved to a separate cloud sphere pass (CloudPassFS.wgsl)
+// to give clouds a realistic altitude above the Earth's surface and to avoid
+// the UV-wrap seam that affected the previous 2-D noise approach.
 
 struct GlobeUniforms {
   mvp        : mat4x4<f32>,
@@ -23,37 +26,6 @@ struct FragIn {
   @location(2)       uv     : vec2<f32>,
 }
 
-// ── FBM cloud noise (identical to GlobeFS.wgsl) ──────────────────────────────
-
-fn hash(p : vec2<f32>) -> f32 {
-  var q = fract(p * vec2<f32>(127.1, 311.7));
-  q += dot(q, q + 19.19);
-  return fract(q.x * q.y);
-}
-
-fn noise2(p : vec2<f32>) -> f32 {
-  let i = floor(p);
-  let f = fract(p);
-  let s = f * f * (3.0 - 2.0 * f);  // smoothstep
-  return mix(
-    mix(hash(i),                    hash(i + vec2<f32>(1.0, 0.0)), s.x),
-    mix(hash(i + vec2<f32>(0.0, 1.0)), hash(i + vec2<f32>(1.0, 1.0)), s.x),
-    s.y
-  );
-}
-
-fn fbm(p_in : vec2<f32>) -> f32 {
-  var p = p_in;
-  var v = 0.0;
-  var a = 0.5;
-  for (var i = 0; i < 5; i++) {
-    v += a * noise2(p);
-    p  *= 2.0;
-    a  *= 0.5;
-  }
-  return v;
-}
-
 fn ss(e0 : f32, e1 : f32, x : f32) -> f32 {
   let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
   return t * t * (3.0 - 2.0 * t);
@@ -72,11 +44,6 @@ fn main(f : FragIn) -> @location(0) vec4<f32> {
   let texColor = textureSample(earthTex, earthSampler, uv);
   var col = texColor.rgb;
 
-  // ── Animated cloud layer (same fbm as GlobeFS.wgsl) ─────────────────────────
-  let cuv   = uv + vec2<f32>(u.time * 0.004, 0.0);
-  let cloud = ss(0.60, 0.68, fbm(cuv * vec2<f32>(5.0, 8.0)));
-  col = mix(col, vec3<f32>(0.97, 0.98, 1.0), cloud * 0.60);
-
   // ── Diffuse lighting ─────────────────────────────────────────────────────────
   let N   = normalize(f.normEC);
   let L   = normalize(u.lightDirEC);
@@ -92,8 +59,8 @@ fn main(f : FragIn) -> @location(0) vec4<f32> {
   col        += vec3<f32>(1.0, 0.97, 0.90) * spec;
 
   // ── Fresnel atmospheric rim ──────────────────────────────────────────────────
-  let rim = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 3.2) * 0.48;
-  col    += vec3<f32>(0.08, 0.20, 0.68) * rim;
+  let rim = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 2.5) * 0.85;
+  col    += vec3<f32>(0.10, 0.38, 0.92) * rim;
 
   // ── Night-side ambient ───────────────────────────────────────────────────────
   let night = 1.0 - clamp(ndl * 2.2 + 0.35, 0.0, 1.0);
