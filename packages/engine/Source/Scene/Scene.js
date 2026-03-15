@@ -4844,14 +4844,17 @@ function render(scene) {
     // Update the renderer's external simulation time each Cesium frame.
     // The renderer's own RAF loop reads this value – it does NOT tick any
     // clock itself (CesiumWidget already did that above).
+    // Use frameState.time (set by updateFrameNumber before this function runs)
+    // rather than the outer Scene.prototype.render `time` parameter which is
+    // not in scope here.
     renderer.simulationTime = JulianDate.clone(
-      time,
+      frameState.time,
       renderer.simulationTime,
     );
     if (!defined(renderer.simulationTimeEpoch)) {
       // Set the epoch once on the first frame to the current time so that
       // the shader uniform starts at 0 (seconds since session start).
-      renderer.simulationTimeEpoch = JulianDate.clone(time);
+      renderer.simulationTimeEpoch = JulianDate.clone(frameState.time);
     }
     return;
   }

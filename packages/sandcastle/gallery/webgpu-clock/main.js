@@ -33,16 +33,27 @@ viewer.scene.globe.enableLighting = true;
 viewer.timeline.zoomTo(clock.startTime, clock.stopTime);
 
 // ─── WebGPU status badge ──────────────────────────────────────────────────────
-// Display a badge in the toolbar once the WebGPU renderer is ready so the
+// Display a label in the toolbar once the WebGPU renderer is ready so the
 // user can confirm which rendering backend is active.
+function addStatusLabel(text) {
+  const toolbar = document.getElementById("toolbar");
+  if (toolbar) {
+    const label = document.createElement("span");
+    label.textContent = text;
+    label.style.cssText =
+      "padding: 0 8px; line-height: 32px; vertical-align: middle;";
+    toolbar.appendChild(label);
+  }
+}
+
 function checkWebGPUReady() {
   if (viewer.scene.webGPUReady) {
-    Sandcastle.addToolbarLabel("🟢 WebGPU Active");
+    addStatusLabel("🟢 WebGPU Active");
   } else if (typeof Cesium.isWebGPUSupported === "function" && Cesium.isWebGPUSupported()) {
     // WebGPU is supported but may still be initializing – retry shortly.
     setTimeout(checkWebGPUReady, 500);
   } else {
-    Sandcastle.addToolbarLabel("🔵 WebGL (WebGPU not supported in this browser)");
+    addStatusLabel("🔵 WebGL (WebGPU not supported in this browser)");
   }
 }
 checkWebGPUReady();
