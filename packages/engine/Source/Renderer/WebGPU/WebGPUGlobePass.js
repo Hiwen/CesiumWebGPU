@@ -2,14 +2,9 @@ import defined from "../../Core/defined.js";
 import destroyObject from "../../Core/destroyObject.js";
 
 // ── Inline WGSL shaders ───────────────────────────────────────────────────────
-// These are duplicated from GlobePassVS.wgsl / GlobePassFS.wgsl and
-// CloudPassVS.wgsl / CloudPassFS.wgsl.
+// These are duplicated from GlobePassVS.wgsl / GlobePassFS.wgsl.
 // Inlining avoids a build-time dependency on a WGSL asset loader while the
 // engine's shader-import pipeline is being developed for Phase 3.
-
-// Cloud sphere altitude above the Earth surface, normalised to Earth radius = 1.
-// 0.004 ≈ 25 km — visually distinct from the surface at typical zoom levels.
-const CLOUD_HEIGHT = 0.004;
 
 const GLOBE_PASS_VS = /* wgsl */ `
 struct GlobeUniforms {
@@ -43,8 +38,7 @@ fn main(v : VertIn) -> VertOut {
 }
 `;
 
-// Earth sphere fragment shader — no cloud blending.
-// Clouds are rendered separately on a higher-altitude cloud sphere.
+// Earth sphere fragment shader.
 const GLOBE_PASS_FS = /* wgsl */ `
 struct GlobeUniforms {
   mvp        : mat4x4<f32>,
@@ -105,133 +99,6 @@ fn main(f : FragIn) -> @location(0) vec4<f32> {
 }
 `;
 
-// ── Cloud sphere shaders ──────────────────────────────────────────────────────
-// The cloud sphere is rendered at radius (1 + CLOUD_HEIGHT) above the Earth
-// surface, using 3-D world-space FBM noise so there is NO UV-wrap seam.
-// Animation is achieved by rotating the noise input around the Z-axis over
-// time rather than scrolling a 2-D UV — this is inherently seamless.
-
-const CLOUD_PASS_VS = /* wgsl */ `
-struct CloudUniforms {
-  mvp        : mat4x4<f32>,
-  mv         : mat4x4<f32>,
-  lightDirEC : vec3<f32>,
-  time       : f32,
-}
-@group(0) @binding(0) var<uniform> u : CloudUniforms;
-
-// Only position is needed; the unit-sphere direction is derived in the shader.
-struct VertIn {
-  @location(0) pos : vec3<f32>,   // position on cloud sphere (radius = 1 + h)
-}
-struct VertOut {
-  @builtin(position) clip     : vec4<f32>,
-  @location(0)       normEC   : vec3<f32>,   // eye-space normal (outward)
-  @location(1)       posEC    : vec3<f32>,   // eye-space position
-  @location(2)       posWorld : vec3<f32>,   // unit-sphere direction (world space)
-}
-
-@vertex
-fn main(v : VertIn) -> VertOut {
-  var out : VertOut;
-  out.clip     = u.mvp * vec4<f32>(v.pos, 1.0);
-  let dir      = normalize(v.pos);                          // unit outward direction
-  out.normEC   = normalize((u.mv * vec4<f32>(dir, 0.0)).xyz);
-  out.posEC    = (u.mv * vec4<f32>(v.pos, 1.0)).xyz;
-  out.posWorld = dir;   // passed to FS for seamless 3-D noise
-  return out;
-}
-`;
-
-const CLOUD_PASS_FS = /* wgsl */ `
-struct CloudUniforms {
-  mvp        : mat4x4<f32>,
-  mv         : mat4x4<f32>,
-  lightDirEC : vec3<f32>,
-  time       : f32,
-}
-@group(0) @binding(0) var<uniform> u : CloudUniforms;
-
-struct FragIn {
-  @builtin(position) clip     : vec4<f32>,
-  @location(0)       normEC   : vec3<f32>,
-  @location(1)       posEC    : vec3<f32>,
-  @location(2)       posWorld : vec3<f32>,
-}
-
-// ── 3-D value noise — ring-artifact-free ─────────────────────────────────────
-// The original hash used q.x*q.y + q.y*q.z which creates strong axis-aligned
-// correlations, visible as concentric latitude rings on a sphere.  The revised
-// hash uses a cyclic-permutation mix (yzx) followed by a cross-product-style
-// scramble to decorrelate all three axes equally.
-fn hash3(p : vec3<f32>) -> f32 {
-  var q = fract(p * vec3<f32>(127.1, 311.7, 74.7));
-  q = q * 2.0 - 1.0;
-  q += dot(q, q.yzx + 33.33);
-  return fract((q.x + q.y) * q.z);
-}
-fn noise3(p : vec3<f32>) -> f32 {
-  let i = floor(p); let f = fract(p);
-  let s = f * f * (3.0 - 2.0 * f);
-  return mix(
-    mix(mix(hash3(i),                      hash3(i + vec3<f32>(1.,0.,0.)), s.x),
-        mix(hash3(i + vec3<f32>(0.,1.,0.)), hash3(i + vec3<f32>(1.,1.,0.)), s.x), s.y),
-    mix(mix(hash3(i + vec3<f32>(0.,0.,1.)), hash3(i + vec3<f32>(1.,0.,1.)), s.x),
-        mix(hash3(i + vec3<f32>(0.,1.,1.)), hash3(i + vec3<f32>(1.,1.,1.)), s.x), s.y),
-    s.z);
-}
-fn fbm3(p_in : vec3<f32>) -> f32 {
-  var p = p_in; var v = 0.0; var a = 0.5;
-  // Lacunarity 2.07 (slightly irrational) avoids the octave phase-locking that
-  // occurs with exact power-of-2 scaling, which would re-align grid lines and
-  // reinforce the ring pattern.
-  for (var i = 0; i < 5; i++) { v += a * noise3(p); p *= 2.07; a *= 0.5; }
-  return v;
-}
-fn ss(e0 : f32, e1 : f32, x : f32) -> f32 {
-  let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
-  return t * t * (3.0 - 2.0 * t);
-}
-
-@fragment
-fn main(f : FragIn) -> @location(0) vec4<f32> {
-  // Rotate the world-space unit-sphere direction around the Earth's Z-axis
-  // to animate cloud drift.  This is inherently seamless — no UV wrap required.
-  let t  = u.time * 0.003;
-  let ct = cos(t); let st = sin(t);
-  let rotDir = vec3<f32>(
-    f.posWorld.x * ct - f.posWorld.y * st,
-    f.posWorld.x * st + f.posWorld.y * ct,
-    f.posWorld.z
-  );
-
-  // Domain warp: use a single low-frequency noise evaluation to perturb the
-  // input before the main FBM.  This physically breaks any remaining
-  // axis-aligned ring pattern without the cost of a full second FBM pass.
-  let warpSeed = rotDir * 2.1 + vec3<f32>(17.3, 5.7, 9.1);
-  let warp     = noise3(warpSeed) * 0.45;
-  let warpDir  = rotDir + vec3<f32>(warp, warp * 0.73, warp * 1.17);
-
-  // 3-D FBM cloud density — completely seamless, no meridian artifact.
-  let density = ss(0.52, 0.62, fbm3(warpDir * 5.0));
-
-  // Discard transparent fragments so the depth buffer is not dirtied.
-  if (density < 0.02) { discard; }
-
-  // Diffuse lighting for the cloud layer.
-  let N   = normalize(f.normEC);
-  let L   = normalize(u.lightDirEC);
-  let V   = normalize(-f.posEC);
-  let ndl = clamp(dot(N, L), 0.0, 1.0);
-  let lit = 0.35 + ndl * 0.65;
-
-  // Clouds are bright white; night-side clouds appear faintly dark.
-  let cloudRGB = vec3<f32>(0.96, 0.97, 1.0) * lit;
-
-  return vec4<f32>(cloudRGB, density * 0.90);
-}
-`;
-
 // ── Uniform buffer layout (bytes) ────────────────────────────────────────────
 // Offset   0: mat4x4<f32> mvp        (64 bytes)
 // Offset  64: mat4x4<f32> mv         (64 bytes)
@@ -269,12 +136,6 @@ function WebGPUGlobePass(context) {
   this._uniformBindGroup = undefined;
   this._textureBindGroup = undefined;
   this._pipeline = undefined;
-  // Cloud sphere (rendered above the Earth at CLOUD_HEIGHT altitude)
-  this._cloudVertexBuffer = undefined;
-  this._cloudIndexBuffer = undefined;
-  this._cloudIndexCount = 0;
-  this._cloudPipeline = undefined;
-  this._cloudUniformBindGroup = undefined;
   this._ready = false;
 }
 
@@ -306,10 +167,7 @@ WebGPUGlobePass.prototype._initialize = async function (imageSource) {
   // 1. Build UV-sphere geometry (Earth surface) ---------------------------------
   this._buildSphere(device, 80, 160);
 
-  // 2. Build cloud sphere geometry (slightly larger radius) ---------------------
-  this._buildCloudSphere(device, 80, 160);
-
-  // 3. Uniform buffer -----------------------------------------------------------
+  // 2. Uniform buffer -----------------------------------------------------------
   this._uniformBuffer = device.createBuffer({
     label: "GlobePassUniforms",
     size: UNIFORM_BUFFER_SIZE,
@@ -330,9 +188,8 @@ WebGPUGlobePass.prototype._initialize = async function (imageSource) {
   // 5. Upload imagery texture ---------------------------------------------------
   await this._uploadTexture(device, imageSource);
 
-  // 6. Create render pipelines --------------------------------------------------
+  // 6. Create render pipeline ---------------------------------------------------
   this._pipeline = await this._createPipeline(device, canvasFormat);
-  this._cloudPipeline = await this._createCloudPipeline(device, canvasFormat);
 
   // 7. Create bind groups -------------------------------------------------------
   this._createBindGroups(device);
@@ -418,74 +275,6 @@ WebGPUGlobePass.prototype._buildSphere = function (
   new Uint32Array(this._indexBuffer.getMappedRange()).set(id);
   this._indexBuffer.unmap();
 };
-
-/**
- * Builds a position-only sphere for the cloud layer at radius (1 + CLOUD_HEIGHT).
- * The cloud shader derives the normal from the position, so no separate normal
- * attribute is needed, and there is no UV (3-D noise is used instead).
- * @private
- */
-WebGPUGlobePass.prototype._buildCloudSphere = function (
-  device,
-  latSegments,
-  lonSegments,
-) {
-  const r = 1.0 + CLOUD_HEIGHT;
-  const numVerts = (latSegments + 1) * (lonSegments + 1);
-  // Each vertex: pos(3) = 3 floats
-  const vd = new Float32Array(numVerts * 3);
-  let vi = 0;
-
-  for (let i = 0; i <= latSegments; i++) {
-    const theta = (i / latSegments) * Math.PI;
-    const sinT = Math.sin(theta);
-    const cosT = Math.cos(theta);
-    for (let j = 0; j <= lonSegments; j++) {
-      const phi = (j / lonSegments) * 2 * Math.PI;
-      vd[vi++] = sinT * Math.cos(phi) * r; // x
-      vd[vi++] = sinT * Math.sin(phi) * r; // y
-      vd[vi++] = cosT * r; // z
-    }
-  }
-
-  // The index topology is identical to the Earth sphere.
-  const id = new Uint32Array(latSegments * lonSegments * 6);
-  let ii = 0;
-  for (let i = 0; i < latSegments; i++) {
-    for (let j = 0; j < lonSegments; j++) {
-      const a = i * (lonSegments + 1) + j;
-      const b = a + lonSegments + 1;
-      id[ii++] = a;
-      id[ii++] = b;
-      id[ii++] = a + 1;
-      id[ii++] = b;
-      id[ii++] = b + 1;
-      id[ii++] = a + 1;
-    }
-  }
-  this._cloudIndexCount = id.length;
-
-  this._cloudVertexBuffer = device.createBuffer({
-    label: "CloudPassVB",
-    size: vd.byteLength,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    mappedAtCreation: true,
-  });
-  new Float32Array(this._cloudVertexBuffer.getMappedRange()).set(vd);
-  this._cloudVertexBuffer.unmap();
-
-  // The cloud sphere shares the index buffer with the Earth sphere.
-  // Build a dedicated one here so the two can be destroyed independently.
-  this._cloudIndexBuffer = device.createBuffer({
-    label: "CloudPassIB",
-    size: id.byteLength,
-    usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-    mappedAtCreation: true,
-  });
-  new Uint32Array(this._cloudIndexBuffer.getMappedRange()).set(id);
-  this._cloudIndexBuffer.unmap();
-};
-
 
 /**
  * Uploads an image source to a GPU texture.
@@ -594,72 +383,7 @@ WebGPUGlobePass.prototype._createPipeline = async function (
 };
 
 /**
- * Creates the cloud sphere render pipeline.
- * The cloud sphere uses alpha blending and disables depth writes so that
- * partially transparent clouds do not occlude the terrain behind them.
- * @private
- */
-WebGPUGlobePass.prototype._createCloudPipeline = async function (
-  device,
-  canvasFormat,
-) {
-  const vsMod = device.createShaderModule({
-    label: "CloudPassVS",
-    code: CLOUD_PASS_VS,
-  });
-  const fsMod = device.createShaderModule({
-    label: "CloudPassFS",
-    code: CLOUD_PASS_FS,
-  });
-
-  // Cloud sphere vertex buffer layout: pos(3f) only
-  const cloudVertexLayout = {
-    arrayStride: 3 * 4, // 3 floats × 4 bytes
-    attributes: [
-      { shaderLocation: 0, offset: 0, format: "float32x3" }, // pos
-    ],
-  };
-
-  return device.createRenderPipeline({
-    label: "CloudPassPipeline",
-    layout: "auto",
-    vertex: {
-      module: vsMod,
-      entryPoint: "main",
-      buffers: [cloudVertexLayout],
-    },
-    fragment: {
-      module: fsMod,
-      entryPoint: "main",
-      targets: [
-        {
-          format: canvasFormat,
-          blend: {
-            color: {
-              srcFactor: "src-alpha",
-              dstFactor: "one-minus-src-alpha",
-            },
-            alpha: { srcFactor: "one", dstFactor: "zero" },
-          },
-        },
-      ],
-    },
-    primitive: { topology: "triangle-list", cullMode: "back" },
-    depthStencil: {
-      format: "depth24plus",
-      // Do not write depth for the transparent cloud layer so that it does not
-      // incorrectly occlude terrain drawn later at the same or lower depth.
-      depthWriteEnabled: false,
-      depthCompare: "less",
-    },
-  });
-};
-
-
-/**
  * Creates bind groups referencing the pipeline's auto-generated layout.
- * Both the Earth sphere and the cloud sphere bind groups are created here
- * since they share the same underlying uniform buffer.
  * @private
  */
 WebGPUGlobePass.prototype._createBindGroups = function (device) {
@@ -684,23 +408,6 @@ WebGPUGlobePass.prototype._createBindGroups = function (device) {
     entries: [
       { binding: 0, resource: this._texture.createView() },
       { binding: 1, resource: this._sampler },
-    ],
-  });
-
-  // The cloud pipeline has its own auto-generated bind group layout but
-  // references the same uniform buffer (same mvp / mv / lightDirEC / time).
-  this._cloudUniformBindGroup = device.createBindGroup({
-    label: "CloudPassUniformBG",
-    layout: this._cloudPipeline.getBindGroupLayout(0),
-    entries: [
-      {
-        binding: 0,
-        resource: {
-          buffer: this._uniformBuffer,
-          offset: 0,
-          size: UNIFORM_BUFFER_SIZE,
-        },
-      },
     ],
   });
 };
@@ -790,13 +497,6 @@ WebGPUGlobePass.prototype.render = function (
   pass.setBindGroup(1, this._textureBindGroup);
   pass.drawIndexed(this._indexCount);
 
-  // ── Cloud sphere (rendered above the Earth surface, alpha-blended) ──────────
-  pass.setPipeline(this._cloudPipeline);
-  pass.setVertexBuffer(0, this._cloudVertexBuffer);
-  pass.setIndexBuffer(this._cloudIndexBuffer, "uint32");
-  pass.setBindGroup(0, this._cloudUniformBindGroup);
-  pass.drawIndexed(this._cloudIndexCount);
-
   pass.end();
 };
 
@@ -824,12 +524,6 @@ WebGPUGlobePass.prototype.destroy = function () {
   }
   if (defined(this._texture)) {
     this._texture.destroy();
-  }
-  if (defined(this._cloudVertexBuffer)) {
-    this._cloudVertexBuffer.destroy();
-  }
-  if (defined(this._cloudIndexBuffer)) {
-    this._cloudIndexBuffer.destroy();
   }
   return destroyObject(this);
 };
