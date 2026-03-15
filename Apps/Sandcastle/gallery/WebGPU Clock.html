@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no"
+    />
+    <meta
+      name="description"
+      content="Demonstrates the Cesium Timeline and Animation widget working with the WebGPU rendering backend."
+    />
+    <meta name="cesium-sandcastle-labels" content="Animation,WebGPU" />
+    <title>Cesium Demo</title>
+    <script type="text/javascript" src="../Sandcastle-header.js"></script>
+    <script
+      type="text/javascript"
+      src="../../../Build/CesiumUnminified/Cesium.js"
+      nomodule
+    ></script>
+    <script type="module" src="../load-cesium-es6.js"></script>
+  </head>
+  <body class="sandcastle-loading" data-sandcastle-bucket="bucket-requirejs.html">
+    <style>
+      @import url(../templates/bucket.css);
+    </style>
+    <div id="cesiumContainer" class="fullSize"></div>
+    <div id="loadingOverlay"><h1>Loading...</h1></div>
+    <div id="toolbar"></div>
+    <script id="cesium_sandcastle_script">
+      window.startup = async function (Cesium) {
+        "use strict";
+        //Sandcastle_Begin
+        // ── Clock setup ──────────────────────────────────────────────────────
+        // The clock loops over the year 2024 at 1 day per second.
+        // When WebGPU is available the globe's cloud-animation shader uniform
+        // will reflect the simulation time from this clock.
+        const clock = new Cesium.Clock({
+          startTime: Cesium.JulianDate.fromIso8601("2024-01-01T00:00:00Z"),
+          currentTime: Cesium.JulianDate.fromIso8601("2024-01-01T00:00:00Z"),
+          stopTime: Cesium.JulianDate.fromIso8601("2025-01-01T00:00:00Z"),
+          clockRange: Cesium.ClockRange.LOOP_STOP,
+          clockStep: Cesium.ClockStep.SYSTEM_CLOCK_MULTIPLIER,
+          multiplier: 86400, // 1 day per real second
+          shouldAnimate: true,
+        });
+
+        const viewer = new Cesium.Viewer("cesiumContainer", {
+          clockViewModel: new Cesium.ClockViewModel(clock),
+          shouldAnimate: true,
+        });
+
+        viewer.scene.globe.enableLighting = true;
+
+        // Zoom the Cesium native timeline bar to the full 2024 range.
+        viewer.timeline.zoomTo(clock.startTime, clock.stopTime);
+
+        // ── WebGPU status indicator ───────────────────────────────────────────
+        function checkWebGPUReady() {
+          if (viewer.scene.webGPUReady) {
+            Sandcastle.addToolbarLabel("🟢 WebGPU Active");
+          } else if (
+            typeof Cesium.isWebGPUSupported === "function" &&
+            Cesium.isWebGPUSupported()
+          ) {
+            setTimeout(checkWebGPUReady, 500);
+          } else {
+            Sandcastle.addToolbarLabel(
+              "🔵 WebGL (WebGPU not supported in this browser)",
+            );
+          }
+        }
+        checkWebGPUReady();
+
+        // ── Toolbar controls (same as native Clock demo) ──────────────────────
+        Sandcastle.addToolbarButton("⏮ Reset to Start", function () {
+          viewer.clock.currentTime = Cesium.JulianDate.clone(
+            viewer.clock.startTime,
+          );
+          viewer.timeline.updateFromClock();
+        });
+
+        Sandcastle.addToolbarButton("⏪ Slow Down (½×)", function () {
+          viewer.clockViewModel.multiplier /= 2;
+        });
+
+        Sandcastle.addToolbarButton("⏩ Speed Up (2×)", function () {
+          viewer.clockViewModel.multiplier *= 2;
+        });
+
+        Sandcastle.addToolbarButton("⏭ Jump to End", function () {
+          viewer.clock.currentTime = Cesium.JulianDate.clone(
+            viewer.clock.stopTime,
+          );
+          viewer.timeline.updateFromClock();
+        }); //Sandcastle_End
+      };
+      if (typeof Cesium !== "undefined") {
+        window.startupCalled = true;
+        window.startup(Cesium).catch((error) => {
+          "use strict";
+          console.error(error);
+        });
+      }
+    </script>
+  </body>
+</html>

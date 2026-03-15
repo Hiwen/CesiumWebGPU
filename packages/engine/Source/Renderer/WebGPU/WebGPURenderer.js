@@ -56,6 +56,24 @@ function WebGPURenderer(context, options) {
    */
   this.clock = options.clock ?? undefined;
 
+  /**
+   * External simulation time set by the Cesium render loop (e.g. from Scene.render).
+   * When both this and `simulationTimeEpoch` are defined, this JulianDate is used
+   * for the `time` shader uniform instead of the clock or `performance.now()`.
+   * It is updated externally every frame; the renderer does NOT tick any clock.
+   * Pre-allocated to avoid per-frame GC pressure once set by the first Scene frame.
+   * Guarded by `simulationTimeEpoch` – having only one set has no effect.
+   * @type {JulianDate}
+   */
+  this.simulationTime = new JulianDate();
+
+  /**
+   * Epoch (start time) used together with `simulationTime` to compute the
+   * seconds-since-start shader uniform.  Set alongside `simulationTime`.
+   * @type {JulianDate|undefined}
+   */
+  this.simulationTimeEpoch = undefined;
+
   // Execute render-command lists accumulated during scene traversal.
   this._opaqueCommandList = [];
   this._translucentCommandList = [];
@@ -314,7 +332,13 @@ WebGPURenderer.prototype.renderGlobePass = function (uniformOverride) {
     _uniformScratch[33] = sun[1];
     _uniformScratch[34] = sun[2];
     // Use clock simulation time when available, otherwise wall-clock time.
-    if (defined(this.clock)) {
+    // Priority: simulationTime (set externally by Scene.render) > clock (self-managed) > performance.now()
+    if (defined(this.simulationTime) && defined(this.simulationTimeEpoch)) {
+      _uniformScratch[35] = JulianDate.secondsDifference(
+        this.simulationTime,
+        this.simulationTimeEpoch,
+      );
+    } else if (defined(this.clock)) {
       _uniformScratch[35] = JulianDate.secondsDifference(
         this.clock.currentTime,
         this.clock.startTime,

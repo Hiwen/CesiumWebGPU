@@ -1,0 +1,9 @@
+title: WebGPU Clock & Timeline
+description: >
+  Demonstrates the Cesium Timeline and Animation widget working with the WebGPU
+  rendering backend. The globe is rendered by the WebGPU pipeline while the
+  native Cesium timeline at the bottom provides full play/pause, scrubbing, and
+  speed controls — identical to native Cesium behavior.
+labels:
+  - Animation
+  - WebGPU
