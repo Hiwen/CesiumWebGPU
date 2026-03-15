@@ -206,12 +206,29 @@ function Scene(options) {
     WebGPURenderer.create(webgpuCanvas, options.webGPUOptions)
       .then(async (renderer) => {
         this._webGPURenderer = renderer;
-        // Load satellite imagery for the WebGPU globe.  Try NASA Blue Marble
-        // from CDN first; fall back to a richer procedural texture.
+        // Load satellite imagery for the WebGPU globe.
+        //
+        // The preferred source is the NASA Blue Marble composite
+        // (land_ocean_ice_cloud_2048.jpg, 2048×1024 equirectangular JPEG).
+        // It captures real satellite data for land, ocean, sea ice, and cloud
+        // cover all baked into one image.  loadEarthSatelliteTexture() tries
+        // several CORS-enabled mirrors in order; if all fail we fall back to
+        // createProceduralEarthCanvas() which draws simplified continent
+        // polygon outlines on a canvas element.
+        //
+        // Regardless of which texture source is used, the WGSL fragment
+        // shader (GlobePassFS) adds an animated cloud layer at runtime using
+        // FBM (Fractional Brownian Motion) noise — that is what produces the
+        // moving clouds visible in the rendered globe.
         let globeImageSource;
         try {
           globeImageSource = await loadEarthSatelliteTexture();
         } catch (_fetchErr) {
+          console.info(
+            "[Cesium] WebGPU globe: all satellite texture sources unavailable " +
+              "(likely CORS restrictions). Using procedural Earth texture. " +
+              "Animated clouds are still rendered via the WGSL shader.",
+          );
           globeImageSource = createProceduralEarthCanvas(1024, 512);
         }
         try {
@@ -4396,18 +4413,36 @@ const scratchBackgroundColor = new Color();
 // These are standard equirectangular Earth textures where u=0 corresponds to
 // lon=-180° (international date line).  The UV sphere shifts u by +0.5 so that
 // the prime meridian (lon=0°) lands at the texture centre (u=0.5).
+//
+// URL notes:
+//   1. GitHub raw content (raw.githubusercontent.com) is the most reliable
+//      CORS-friendly mirror: it serves Access-Control-Allow-Origin: * on all
+//      blobs, so fetch() with mode:'cors' succeeds in any browser context.
+//      This is the Three.js mirror of the original NASA Blue Marble composite
+//      (land + ocean + ice + clouds, 2048×1024 JPEG — identical file).
+//   2. Wikimedia Upload CDN also serves CORS headers and hosts a 2048-px
+//      version of the Blue Marble 2002 PNG (land + ocean + ice, no cloud bake).
+//   3. NASA Earth Observatory (eoimages.gsfc.nasa.gov) is the authoritative
+//      source but does NOT send CORS headers, so fetch() always fails in
+//      browser contexts.  It is kept last as a last-resort attempt in case
+//      the server policy changes.
 const _EARTH_TEXTURE_URLS = [
-  // NASA Blue Marble (land + ocean + ice + clouds, 2048×1024 JPEG)
-  "https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57735/land_ocean_ice_cloud_2048.jpg",
-  // Wikimedia mirror of Blue Marble 2002 PNG
+  // ① GitHub / Three.js mirror – CORS-enabled, same NASA Blue Marble JPEG
+  "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/land_ocean_ice_cloud_2048.jpg",
+  // ② Wikimedia CDN – CORS-enabled, Blue Marble 2002 PNG (no cloud bake)
   "https://upload.wikimedia.org/wikipedia/commons/thumb/2/23/Blue_Marble_2002.png/2048px-Blue_Marble_2002.png",
+  // ③ NASA origin – no CORS headers; will fail in most browser contexts
+  "https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57735/land_ocean_ice_cloud_2048.jpg",
 ];
 
 /**
  * Attempts to fetch a real satellite Earth texture from a CDN.
  *
- * Tries each URL in {@link _EARTH_TEXTURE_URLS} with a 12-second timeout.
- * Resolves with an {@link ImageBitmap} on success; rejects if all URLs fail.
+ * Tries each URL in {@link _EARTH_TEXTURE_URLS} with a 12-second timeout,
+ * using an explicit CORS mode so that opaque responses are not silently
+ * accepted.  Resolves with an {@link ImageBitmap} on success; rejects if all
+ * URLs fail (the caller should then fall back to
+ * {@link createProceduralEarthCanvas}).
  *
  * @returns {Promise<ImageBitmap>}
  * @private
@@ -4417,16 +4452,21 @@ async function loadEarthSatelliteTexture() {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12000);
     try {
-      const resp = await fetch(url, { signal: controller.signal });
+      const resp = await fetch(url, { signal: controller.signal, mode: "cors" });
       clearTimeout(timer);
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);
       }
       const blob = await resp.blob();
-      return await createImageBitmap(blob);
+      const bmp = await createImageBitmap(blob);
+      console.debug(`[Cesium] WebGPU earth texture loaded from: ${url}`);
+      return bmp;
     } catch (err) {
       clearTimeout(timer);
-      console.debug(`[Cesium] WebGPU earth texture failed for ${url}:`, err.message ?? err);
+      console.debug(
+        `[Cesium] WebGPU earth texture unavailable from ${url}:`,
+        err.message ?? err,
+      );
       // Try the next URL.
     }
   }
@@ -4443,6 +4483,9 @@ async function loadEarthSatelliteTexture() {
  * Coordinate convention:  u=0 → lon=-180° (date line),  u=1 → lon=+180°.
  * The UV sphere shifts by +0.5, so the prime meridian (lon=0°) appears at
  * u=0.5 (centre of texture), matching standard equirectangular conventions.
+ *
+ * Note: Animated cloud cover is generated by the WGSL fragment shader at
+ * render time using FBM noise — it is NOT baked into this texture.
  *
  * @param {number} [width=512]
  * @param {number} [height=256]
@@ -4461,6 +4504,38 @@ function createProceduralEarthCanvas(width = 512, height = 256) {
   }
   const img = ctx.createImageData(width, height);
   const d = img.data;
+
+  // Simple value-noise helper used to add subtle color variation so that
+  // the procedural texture avoids the flat/uniform look of pure biome bands.
+  // This is the same hash/noise pattern used in the WGSL shaders.
+  //
+  // hash2 returns a pseudo-random float in [0, 1) for a given integer lattice
+  // point (px, py).  The constants 127.1, 311.7, 269.5, 183.3 are arbitrary
+  // large primes chosen to give a good distribution; 19.19 is a small
+  // irrational offset that breaks the lattice alignment.
+  function hash2(px, py) {
+    // Compute two independent dot products with prime-vector seeds.
+    const raw = px * 127.1 + py * 311.7;
+    // Wrap to [0, 1) using the portable double-modulo idiom.
+    const qx = ((raw % 1) + 1) % 1;
+    const qy = (((px * 269.5 + py * 183.3) % 1) + 1) % 1;
+    // Mix via multiply-and-fract; add 19.19 to break lattice symmetry.
+    return (((qx + qx * qx + qy * qy + 19.19) * (qy + qx * qy)) % 1 + 1) % 1;
+  }
+  function valueNoise(px, py) {
+    const ix = Math.floor(px),
+      iy = Math.floor(py);
+    const fx = px - ix,
+      fy = py - iy;
+    const sx = fx * fx * (3 - 2 * fx),
+      sy = fy * fy * (3 - 2 * fy);
+    return (
+      hash2(ix, iy) * (1 - sx) * (1 - sy) +
+      hash2(ix + 1, iy) * sx * (1 - sy) +
+      hash2(ix, iy + 1) * (1 - sx) * sy +
+      hash2(ix + 1, iy + 1) * sx * sy
+    );
+  }
 
   // Continent mask polygons in (lon, lat) degrees – simplified outlines.
   // Source: same outline data used in WebGPUEarthDemo.html.
@@ -4656,6 +4731,16 @@ function createProceduralEarthCanvas(width = 512, height = 256) {
         continue;
       }
 
+      // Low-frequency noise for subtle color variation (avoids flat look).
+      const nx = (lon + 180) / 360; // [0, 1]
+      const ny = (90 - lat) / 180; // [0, 1]
+      const n1 = valueNoise(nx * 12, ny * 12); // fine grain (12 octave-0 periods)
+      const n2 = valueNoise(nx * 4, ny * 4); // coarse grain (4 octave-0 periods)
+      const noise = 0.6 * n1 + 0.4 * n2; // weighted sum ∈ [0, 1)
+      // ±14 RGB jitter: keeps land/ocean colours recognisable while breaking
+      // the uniform look of biome bands.  Factor of 28 = 2 × jitter_amplitude.
+      const nv = (noise - 0.5) * 28;
+
       // Check continents.
       let isLand = false;
       for (const poly of continents) {
@@ -4666,32 +4751,42 @@ function createProceduralEarthCanvas(width = 512, height = 256) {
       }
 
       if (isLand) {
-        // Biome coloring by latitude band.
+        // Biome coloring by latitude band, with noise-based variation.
+        let r, g, b;
         if (absLat < 15) {
-          d[idx] = 34;
-          d[idx + 1] = 100;
-          d[idx + 2] = 34; // Tropical green
+          r = 34;
+          g = 100;
+          b = 34; // Tropical forest / rainforest
         } else if (absLat < 30) {
-          d[idx] = 160;
-          d[idx + 1] = 130;
-          d[idx + 2] = 60; // Savanna/desert
+          r = 160;
+          g = 130;
+          b = 60; // Savanna / subtropical desert
         } else if (absLat < 50) {
-          d[idx] = 80;
-          d[idx + 1] = 120;
-          d[idx + 2] = 50; // Temperate
+          r = 80;
+          g = 120;
+          b = 50; // Temperate forest / grassland
         } else {
-          d[idx] = 100;
-          d[idx + 1] = 120;
-          d[idx + 2] = 80; // Taiga/tundra
+          r = 100;
+          g = 120;
+          b = 80; // Taiga / tundra
         }
+        d[idx] = Math.max(0, Math.min(255, Math.round(r + nv)));
+        // Green and blue channels receive proportionally less noise so that
+        // land hue stays recognisable: green gets 70 %, blue gets 50 % of nv.
+        d[idx + 1] = Math.max(0, Math.min(255, Math.round(g + nv * 0.7)));
+        d[idx + 2] = Math.max(0, Math.min(255, Math.round(b + nv * 0.5)));
       } else {
         // Ocean – depth shading by latitude.  Use a richer blue palette that
         // enables the ocean specular and water-detection pass in the shader
-        // (blue channel significantly higher than red channel).
+        // (blue channel significantly higher than red channel).  Noise adds
+        // subtle shallow-water / current variation.
+        // Base palette at full depth: R=8, G=55, B=200.  Noise contribution
+        // is kept small (30/50/20 %) so the blue-dominant hue is preserved
+        // for the shader's water-detection heuristic (B − R > 0.05).
         const depthFactor = 0.55 + 0.45 * (1 - absLat / 90);
-        d[idx] = Math.round(8 * depthFactor);
-        d[idx + 1] = Math.round(55 * depthFactor);
-        d[idx + 2] = Math.round(200 * depthFactor);
+        d[idx] = Math.max(0, Math.min(255, Math.round(8 * depthFactor + nv * 0.3)));
+        d[idx + 1] = Math.max(0, Math.min(255, Math.round(55 * depthFactor + nv * 0.5)));
+        d[idx + 2] = Math.max(0, Math.min(255, Math.round(200 * depthFactor + nv * 0.2)));
       }
       d[idx + 3] = 255;
     }
