@@ -24,12 +24,17 @@ struct FragIn {
   @location(2)       posWorld : vec3<f32>,
 }
 
-// ── 3-D value noise (seamless: no UV wrap needed) ─────────────────────────────
+// ── 3-D value noise — ring-artifact-free ─────────────────────────────────────
+// The original hash used q.x*q.y + q.y*q.z which creates strong axis-aligned
+// correlations, visible as concentric latitude rings on a sphere.  The revised
+// hash uses a cyclic-permutation mix (yzx) followed by a cross-product-style
+// scramble to decorrelate all three axes equally.
 
 fn hash3(p : vec3<f32>) -> f32 {
   var q = fract(p * vec3<f32>(127.1, 311.7, 74.7));
-  q += dot(q, q + vec3<f32>(19.19, 17.37, 23.41));
-  return fract(q.x * q.y + q.y * q.z);
+  q = q * 2.0 - 1.0;
+  q += dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y) * q.z);
 }
 
 fn noise3(p : vec3<f32>) -> f32 {
@@ -45,7 +50,10 @@ fn noise3(p : vec3<f32>) -> f32 {
 
 fn fbm3(p_in : vec3<f32>) -> f32 {
   var p = p_in; var v = 0.0; var a = 0.5;
-  for (var i = 0; i < 5; i++) { v += a * noise3(p); p *= 2.0; a *= 0.5; }
+  // Lacunarity 2.07 (slightly irrational) avoids the octave phase-locking that
+  // occurs with exact power-of-2 scaling, which would re-align grid lines and
+  // reinforce the ring pattern.
+  for (var i = 0; i < 5; i++) { v += a * noise3(p); p *= 2.07; a *= 0.5; }
   return v;
 }
 
@@ -68,8 +76,15 @@ fn main(f : FragIn) -> @location(0) vec4<f32> {
     f.posWorld.z
   );
 
+  // Domain warp: use a single low-frequency noise evaluation to perturb the
+  // input before the main FBM.  This physically breaks any remaining
+  // axis-aligned ring pattern without the cost of a full second FBM pass.
+  let warpSeed = rotDir * 2.1 + vec3<f32>(17.3, 5.7, 9.1);
+  let warp     = noise3(warpSeed) * 0.45;
+  let warpDir  = rotDir + vec3<f32>(warp, warp * 0.73, warp * 1.17);
+
   // 3-D FBM cloud density — completely seamless, no meridian artifact.
-  let density = ss(0.55, 0.65, fbm3(rotDir * 5.0));
+  let density = ss(0.52, 0.62, fbm3(warpDir * 5.0));
 
   // Discard transparent fragments so the depth buffer is not dirtied.
   if (density < 0.02) { discard; }
