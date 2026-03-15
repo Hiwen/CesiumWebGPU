@@ -194,12 +194,13 @@ function _orbitSensitivity(ctrl) {
  */
 function _applyOrbit(ctrl, dx, dy) {
   const s = _orbitSensitivity(ctrl);
-  // Dragging RIGHT moves the camera to the right side of the globe, which
-  // means we view less of the east → longitude decreases.
-  // Dragging DOWN moves the camera downward → we see more of the south →
-  // latitude decreases.
+  // Dragging RIGHT moves the camera to the right side of the globe →
+  // longitude decreases (camera sweeps westward so the grabbed point follows).
+  // Dragging UP (dy < 0) should make the grabbed point follow the cursor
+  // upward → camera moves southward → latitude decreases.  This matches
+  // Cesium's grab-and-pull orbit convention.
   const dLon = -dx * s;
-  const dLat = -dy * s;
+  const dLat = dy * s;
 
   ctrl._camera._longitude += dLon;
   ctrl._camera._latitude = _clampLat(ctrl._camera._latitude + dLat);
