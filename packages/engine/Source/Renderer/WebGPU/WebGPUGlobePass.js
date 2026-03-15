@@ -81,11 +81,17 @@ fn ss(e0 : f32, e1 : f32, x : f32) -> f32 {
 
 @fragment
 fn main(f : FragIn) -> @location(0) vec4<f32> {
-  let texColor = textureSample(earthTex, earthSampler, f.uv);
+  // Normalize vertex UV u from the [0.5, 1.5] range back into [0, 1) before
+  // passing to textureSample.  The vertex u was shifted +0.5 so that phi=0
+  // (prime meridian, ECEF +X) maps to u=0.5 in a standard equirectangular
+  // texture.  fract() collapses the range without a geometry seam; the
+  // sampler's addressModeU:"repeat" then handles any sub-texel wrap.
+  let uv = vec2<f32>(fract(f.uv.x), f.uv.y);
+  let texColor = textureSample(earthTex, earthSampler, uv);
   var col = texColor.rgb;
 
   // Cloud layer (FBM — same as GlobeFS.wgsl)
-  let cuv = f.uv + vec2<f32>(u.time * 0.004, 0.0);
+  let cuv = uv + vec2<f32>(u.time * 0.004, 0.0);
   col = mix(col, vec3<f32>(0.97, 0.98, 1.0),
             ss(0.60, 0.68, fbm(cuv * vec2<f32>(5.0, 8.0))) * 0.60);
 
@@ -99,10 +105,16 @@ fn main(f : FragIn) -> @location(0) vec4<f32> {
   col += vec3<f32>(1.0, 0.97, 0.90)
        * pow(clamp(dot(N, normalize(L + V)), 0.0, 1.0), 65.0) * isWater * 0.22;
 
-  // Fresnel rim
-  col += vec3<f32>(0.08, 0.20, 0.68) * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 3.2) * 0.48;
+  // Atmosphere glow – simulates the blue limb brightening seen in WebGL's
+  // SkyAtmosphere (now hidden).  The exponent 2.5 gives a broad halo that
+  // starts well before the geometric horizon; 0.85 intensity and the blue-
+  // shifted RGB (0.10, 0.38, 0.92) approximate the Rayleigh-scattered hue
+  // visible from low Earth orbit.  Adjust intensity if the halo looks too
+  // bright or too dim relative to the globe surface.
+  let rim = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 2.5);
+  col += vec3<f32>(0.10, 0.38, 0.92) * rim * 0.85;
 
-  // Night ambient
+  // Night ambient – a very faint blue-black glow on the unlit hemisphere.
   col += vec3<f32>(0.003, 0.005, 0.018) * (1.0 - clamp(ndl * 2.2 + 0.35, 0.0, 1.0));
 
   return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
@@ -228,9 +240,12 @@ WebGPUGlobePass.prototype._buildSphere = function (
       const phi = (j / lonSegments) * 2 * Math.PI;
       const sinP = Math.sin(phi);
       const cosP = Math.cos(phi);
+      // ECEF-compatible orientation so the sphere aligns with Cesium's world-space axes:
+      //   phi=0 → x=+1  (ECEF +X = prime meridian at equator)
+      //   theta=0 → z=+1 (ECEF +Z = geographic north pole, because cos(0)=1)
       const x = sinT * cosP;
-      const y = cosT;
-      const z = sinT * sinP;
+      const y = sinT * sinP;
+      const z = cosT;
       // position == normal for a unit sphere
       vd[vi++] = x;
       vd[vi++] = y;
@@ -238,8 +253,12 @@ WebGPUGlobePass.prototype._buildSphere = function (
       vd[vi++] = x;
       vd[vi++] = y;
       vd[vi++] = z;
-      vd[vi++] = j / lonSegments; // u
-      vd[vi++] = i / latSegments; // v
+      // UV: shift u by +0.5 so the prime meridian (phi=0, ECEF +X) maps to u=0.5,
+      // which is the centre of a standard equirectangular Earth texture (lon=0°).
+      // The u range [0.5, 1.5] is handled correctly by the repeat sampler and
+      // by fract() in the fragment shader.
+      vd[vi++] = j / lonSegments + 0.5; // u
+      vd[vi++] = i / latSegments; // v: 0=north pole, 1=south pole
     }
   }
 
@@ -468,7 +487,13 @@ WebGPUGlobePass.prototype.render = function (
   device.queue.writeBuffer(this._uniformBuffer, 0, buf);
 
   // ── Record render pass ──────────────────────────────────────────────────────
-  const cc = uniforms.clearColor ?? { r: 0.003, g: 0.006, b: 0.018, a: 1.0 };
+  // WebGPU is the sole visual renderer; use an opaque deep-space background.
+  // The WebGL canvas is hidden (visibility:hidden) so there is no need for
+  // transparency compositing.  The RGB values (0.003, 0.004, 0.018) produce a
+  // deep midnight blue – intentionally close to the night-ambient colour in the
+  // fragment shader so the space around the globe blends seamlessly with the
+  // unlit hemisphere rather than appearing as a hard-edged cut.
+  const cc = uniforms.clearColor ?? { r: 0.003, g: 0.004, b: 0.018, a: 1.0 };
   const pass = commandEncoder.beginRenderPass({
     colorAttachments: [
       {

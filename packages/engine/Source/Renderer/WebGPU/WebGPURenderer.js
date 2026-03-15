@@ -6,17 +6,21 @@ import WebGPUContext, { isWebGPUSupported } from "./WebGPUContext.js";
 import WebGPUCommandEncoder from "./WebGPUCommandEncoder.js";
 import WebGPUTexture from "./WebGPUTexture.js";
 import WebGPUGlobePass from "./WebGPUGlobePass.js";
+import WebGPUCamera from "./WebGPUCamera.js";
+import WebGPUCameraController from "./WebGPUCameraController.js";
+
+// Pre-allocated uniform buffer (36 floats: mvp[16] | mv[16] | lightDirEC[3] | time[1])
+const _uniformScratch = new Float32Array(36);
 
 /**
  * High-level WebGPU renderer that manages the per-frame rendering loop.
  *
- * This class is the WebGPU equivalent of the WebGL rendering work done inside
- * `Scene._render` / `Context` / `ComputeEngine`.  It:
- *
- * - Holds a {@link WebGPUContext}
- * - Creates and destroys the per-frame depth buffer as the canvas resizes
- * - Provides `beginFrame()` / `endFrame()` that bracket a frame's render passes
- * - Exposes the color and depth attachment views for use by render-pass builders
+ * Unlike the previous implementation this renderer is **completely
+ * self-contained** – it does not depend on Cesium's WebGL {@link Context} or
+ * {@link UniformState} for camera matrices.  Instead it owns a
+ * {@link WebGPUCamera} and a {@link WebGPUCameraController}, and drives its
+ * own `requestAnimationFrame` loop once
+ * {@link WebGPURenderer#startRenderLoop} is called.
  *
  * Obtain an instance through the async {@link WebGPURenderer.create} factory.
  *
@@ -33,6 +37,8 @@ function WebGPURenderer(context) {
   this._width = 0;
   this._height = 0;
   this._frameCommandEncoder = undefined;
+  this._rafId = undefined;
+  this._destroyed = false;
 
   // Execute render-command lists accumulated during scene traversal.
   this._opaqueCommandList = [];
@@ -44,6 +50,19 @@ function WebGPURenderer(context) {
    * @type {WebGPUGlobePass|undefined}
    */
   this.globePass = undefined;
+
+  /**
+   * The self-contained camera used for globe rendering.
+   * @type {WebGPUCamera}
+   */
+  this.camera = new WebGPUCamera();
+
+  /**
+   * The camera controller that handles pointer/touch interaction.
+   * Created automatically by {@link WebGPURenderer#startRenderLoop}.
+   * @type {WebGPUCameraController|undefined}
+   */
+  this.cameraController = undefined;
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
@@ -238,24 +257,44 @@ WebGPURenderer.prototype.createGlobePass = async function (imageSource) {
 };
 
 /**
- * Renders a single globe frame using the current {@link WebGPUGlobePass}.
+ * Renders a single globe frame using the current {@link WebGPUGlobePass} and
+ * the self-contained {@link WebGPUCamera}.
  *
- * Automatically calls {@link WebGPURenderer#beginFrame} /
- * {@link WebGPURenderer#endFrame} if no frame is currently in flight.
+ * This method no longer depends on Cesium's WebGL {@link UniformState} – all
+ * matrices are computed by {@link WebGPUCamera}.  Call {@link
+ * WebGPURenderer#startRenderLoop} to drive this automatically via
+ * `requestAnimationFrame`.
  *
- * @param {object} uniforms  Forwarded verbatim to {@link WebGPUGlobePass#render}.
- * @param {Float32Array} uniforms.mvp
- * @param {Float32Array} uniforms.mv
- * @param {number[]}     uniforms.lightDirEC
- * @param {number}       uniforms.time
+ * @param {object} [uniformOverride]  Optional per-frame uniform override.
+ *   When provided (legacy path) it bypasses the internal camera.
  */
-WebGPURenderer.prototype.renderGlobePass = function (uniforms) {
+WebGPURenderer.prototype.renderGlobePass = function (uniformOverride) {
   if (!defined(this.globePass) || !this.globePass._ready) {
     return;
   }
 
   const canvas = this._context.canvas;
   this._ensureDepthTexture(canvas.width, canvas.height);
+
+  // Update camera viewport on every frame to handle resize.
+  this.camera.setViewport(canvas.width, canvas.height);
+  this.camera.update();
+
+  // Pack uniforms: mvp(16) | mv(16) | lightDirEC(3) | time(1) = 36 floats
+  let uniforms;
+  if (defined(uniformOverride) && defined(uniformOverride.uniformArray)) {
+    // Legacy path: caller provides pre-packed array (e.g. old Scene.js hook).
+    uniforms = uniformOverride;
+  } else {
+    const sun = this.camera.sunDirectionEC();
+    _uniformScratch.set(this.camera.mvpMatrix, 0);
+    _uniformScratch.set(this.camera.mvMatrix, 16);
+    _uniformScratch[32] = sun[0];
+    _uniformScratch[33] = sun[1];
+    _uniformScratch[34] = sun[2];
+    _uniformScratch[35] = performance.now() * 0.001;
+    uniforms = { uniformArray: _uniformScratch };
+  }
 
   const commandEncoder = this._context.device.createCommandEncoder({
     label: "GlobeFrameEncoder",
@@ -265,6 +304,56 @@ WebGPURenderer.prototype.renderGlobePass = function (uniforms) {
   this.globePass.render(commandEncoder, colorView, this._depthView, uniforms);
 
   this._context.device.queue.submit([commandEncoder.finish()]);
+};
+
+/**
+ * Starts a self-contained `requestAnimationFrame` render loop that drives the
+ * globe rendering without any dependency on Cesium's WebGL render pipeline.
+ *
+ * On the first call this method also creates the {@link WebGPUCameraController}
+ * and attaches it to the WebGPU canvas so that the globe responds to mouse,
+ * scroll, and touch events (Cesium-compatible interaction model).
+ *
+ * Safe to call multiple times – a second call while a loop is already running
+ * is a no-op.
+ */
+WebGPURenderer.prototype.startRenderLoop = function () {
+  if (defined(this._rafId)) {
+    return; // already running
+  }
+
+  // Create the camera controller on first start so it can attach its event
+  // listeners to the canvas.  Subsequent calls are no-ops (already running).
+  if (!defined(this.cameraController)) {
+    this.cameraController = WebGPUCameraController.create(
+      this.camera,
+      this._context.canvas,
+    );
+  }
+
+  const self = this;
+  function frame() {
+    if (self._destroyed) {
+      return;
+    }
+    // Apply inertia / ongoing gestures before computing the camera matrices.
+    if (defined(self.cameraController)) {
+      self.cameraController.update();
+    }
+    self.renderGlobePass();
+    self._rafId = requestAnimationFrame(frame);
+  }
+  self._rafId = requestAnimationFrame(frame);
+};
+
+/**
+ * Stops the render loop started by {@link WebGPURenderer#startRenderLoop}.
+ */
+WebGPURenderer.prototype.stopRenderLoop = function () {
+  if (defined(this._rafId)) {
+    cancelAnimationFrame(this._rafId);
+    this._rafId = undefined;
+  }
 };
 
 /**
@@ -330,11 +419,19 @@ WebGPURenderer.prototype.isDestroyed = function () {
  * Destroys the renderer and all associated GPU resources.
  */
 WebGPURenderer.prototype.destroy = function () {
+  this._destroyed = true;
+  this.stopRenderLoop();
+  if (defined(this.cameraController) && !this.cameraController.isDestroyed()) {
+    this.cameraController.destroy();
+  }
   if (defined(this._depthTexture) && !this._depthTexture.isDestroyed()) {
     this._depthTexture.destroy();
   }
   if (defined(this.globePass) && !this.globePass.isDestroyed()) {
     this.globePass.destroy();
+  }
+  if (defined(this.camera) && !this.camera.isDestroyed()) {
+    this.camera.destroy();
   }
   this._context.destroy();
   return destroyObject(this);

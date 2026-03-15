@@ -163,17 +163,25 @@ function Scene(options) {
   this._webGPUCanvas = undefined;
   this._webGPUResizeObserver = undefined;
   if (options.useWebGPU !== false && isWebGPUSupported()) {
-    // Create the overlay canvas
+    // WebGPU is the sole visual renderer.  A new <canvas> is created for
+    // WebGPU rendering and placed above the WebGL canvas in the DOM.  The
+    // WebGL canvas is hidden immediately so users only see WebGPU output.
+    // The WebGL context still exists (a deep refactor would be needed to
+    // remove it entirely), but its render loop is a no-op while WebGPU is
+    // active.  The WebGPU canvas receives pointer-events (no
+    // `pointer-events:none`) so future mouse/touch camera interaction can be
+    // wired up directly to it.
+
+    // Hide the WebGL canvas immediately – the WebGPU canvas replaces it.
+    canvas.style.visibility = "hidden";
+
     const webgpuCanvas = document.createElement("canvas");
     webgpuCanvas.width = canvas.width;
     webgpuCanvas.height = canvas.height;
     webgpuCanvas.style.cssText =
-      "position:absolute;top:0;left:0;width:100%;height:100%;" +
-      "pointer-events:none;z-index:1;";
-    webgpuCanvas.setAttribute("aria-hidden", "true");
+      "position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;";
     const container = canvas.parentNode;
     if (defined(container)) {
-      // Ensure the parent is a positioning context
       const pos = window.getComputedStyle
         ? window.getComputedStyle(container).position
         : container.style.position;
@@ -184,10 +192,7 @@ function Scene(options) {
     }
     this._webGPUCanvas = webgpuCanvas;
 
-    // Keep the WebGPU canvas dimensions in sync with the WebGL canvas.
-    // A ResizeObserver is used when available (all modern browsers); otherwise
-    // the canvas dimensions are corrected lazily at the start of each render
-    // frame in WebGPURenderer._ensureDepthTexture.
+    // Keep the WebGPU canvas dimensions in sync with the container.
     if (typeof ResizeObserver !== "undefined") {
       this._webGPUResizeObserver = new ResizeObserver(() => {
         if (defined(this._webGPUCanvas)) {
@@ -201,16 +206,34 @@ function Scene(options) {
     WebGPURenderer.create(webgpuCanvas, options.webGPUOptions)
       .then(async (renderer) => {
         this._webGPURenderer = renderer;
-        // Auto-create the globe pass with a procedural earth canvas so the
-        // WebGPU overlay renders immediately without caller intervention.
+        // Load satellite imagery for the WebGPU globe.  Try NASA Blue Marble
+        // from CDN first; fall back to a richer procedural texture.
+        let globeImageSource;
         try {
-          await renderer.createGlobePass(createProceduralEarthCanvas(256, 128));
+          globeImageSource = await loadEarthSatelliteTexture();
+        } catch (_fetchErr) {
+          globeImageSource = createProceduralEarthCanvas(1024, 512);
+        }
+        try {
+          await renderer.createGlobePass(globeImageSource);
+          // Start the self-contained WebGPU render loop.  This loop is
+          // completely independent of the Cesium WebGL frame pipeline – it
+          // uses WebGPUCamera which computes correct WebGPU-native projection
+          // matrices (depth NDC ∈ [0, 1]) so the globe's front face is never
+          // clipped (no donut artefact).
+          renderer.startRenderLoop();
         } catch (globeErr) {
           console.warn("[Cesium] WebGPU globe pass creation failed.", globeErr);
         }
         this._webGPUReady = true;
+        console.info(
+          "[Cesium] WebGPU renderer is the active renderer. " +
+            "Verify: viewer.scene.webGPUReady === true",
+        );
       })
       .catch((error) => {
+        // WebGPU not available – restore the WebGL canvas and fall back.
+        canvas.style.visibility = "";
         console.warn(
           "[Cesium] WebGPU initialisation failed, continuing with WebGL renderer.",
           error,
@@ -4369,21 +4392,46 @@ function postPassesUpdate(scene) {
 
 const scratchBackgroundColor = new Color();
 
-// Scratch storage for the WebGPU globe-pass uniform arrays (reused every frame
-// to avoid per-frame allocations).  Each matrix is 16 floats; the uniform
-// struct in the WGSL shader is { mvp(64B), mv(64B), lightDirEC(12B), time(4B) }
-// laid out with std140/WebGPU alignment – total 144 bytes at offset 0.
-// We keep a flat Float32Array and fill it manually.
-const _webGPUUniformBuf = new Float32Array(36); // 16 + 16 + 3 + 1 = 36 floats
-// WGS84 semi-major axis ≈ 6 378 137 m – used to scale the unit UV sphere in
-// the GlobePassVS to real-world Earth size.
-const _EARTH_RADIUS = 6378137.0;
-// Milliseconds-to-seconds conversion for the shader time uniform.
-const _MS_TO_SECONDS = 0.001;
-// Scratch Matrix4s for MVP / MV computation.
-const _scratchScaleMat = new Matrix4();
-const _scratchMVMat = new Matrix4();
-const _scratchMVPMat = new Matrix4();
+// ── Satellite-imagery texture URLs (tried in order, first success wins) ───────
+// These are standard equirectangular Earth textures where u=0 corresponds to
+// lon=-180° (international date line).  The UV sphere shifts u by +0.5 so that
+// the prime meridian (lon=0°) lands at the texture centre (u=0.5).
+const _EARTH_TEXTURE_URLS = [
+  // NASA Blue Marble (land + ocean + ice + clouds, 2048×1024 JPEG)
+  "https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57735/land_ocean_ice_cloud_2048.jpg",
+  // Wikimedia mirror of Blue Marble 2002 PNG
+  "https://upload.wikimedia.org/wikipedia/commons/thumb/2/23/Blue_Marble_2002.png/2048px-Blue_Marble_2002.png",
+];
+
+/**
+ * Attempts to fetch a real satellite Earth texture from a CDN.
+ *
+ * Tries each URL in {@link _EARTH_TEXTURE_URLS} with a 12-second timeout.
+ * Resolves with an {@link ImageBitmap} on success; rejects if all URLs fail.
+ *
+ * @returns {Promise<ImageBitmap>}
+ * @private
+ */
+async function loadEarthSatelliteTexture() {
+  for (const url of _EARTH_TEXTURE_URLS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+      const resp = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      return await createImageBitmap(blob);
+    } catch (err) {
+      clearTimeout(timer);
+      console.debug(`[Cesium] WebGPU earth texture failed for ${url}:`, err.message ?? err);
+      // Try the next URL.
+    }
+  }
+  throw new Error("[Cesium] All satellite texture URLs failed.");
+}
 
 /**
  * Generates a procedural equirectangular Earth texture on a canvas element.
@@ -4392,12 +4440,16 @@ const _scratchMVPMat = new Matrix4();
  * when no real satellite imagery is available.  It reproduces the same
  * biome-based continental coloring used in the WGSL shaders.
  *
- * @param {number} [width=256]
- * @param {number} [height=128]
+ * Coordinate convention:  u=0 → lon=-180° (date line),  u=1 → lon=+180°.
+ * The UV sphere shifts by +0.5, so the prime meridian (lon=0°) appears at
+ * u=0.5 (centre of texture), matching standard equirectangular conventions.
+ *
+ * @param {number} [width=512]
+ * @param {number} [height=256]
  * @returns {HTMLCanvasElement}
  * @private
  */
-function createProceduralEarthCanvas(width = 256, height = 128) {
+function createProceduralEarthCanvas(width = 512, height = 256) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
@@ -4633,11 +4685,13 @@ function createProceduralEarthCanvas(width = 256, height = 128) {
           d[idx + 2] = 80; // Taiga/tundra
         }
       } else {
-        // Ocean – depth shading by latitude.
-        const depthFactor = 0.6 + 0.4 * (1 - absLat / 90);
-        d[idx] = Math.round(10 * depthFactor);
-        d[idx + 1] = Math.round(60 * depthFactor);
-        d[idx + 2] = Math.round(180 * depthFactor);
+        // Ocean – depth shading by latitude.  Use a richer blue palette that
+        // enables the ocean specular and water-detection pass in the shader
+        // (blue channel significantly higher than red channel).
+        const depthFactor = 0.55 + 0.45 * (1 - absLat / 90);
+        d[idx] = Math.round(8 * depthFactor);
+        d[idx + 1] = Math.round(55 * depthFactor);
+        d[idx + 2] = Math.round(200 * depthFactor);
       }
       d[idx + 3] = 255;
     }
@@ -4679,6 +4733,16 @@ function render(scene) {
   scene.fog.update(frameState);
 
   uniformState.update(frameState);
+
+  // ── WebGPU takes over rendering ───────────────────────────────────────────
+  // When WebGPU is active, its own requestAnimationFrame loop (started by
+  // WebGPURenderer.startRenderLoop()) handles all drawing.  We skip the
+  // WebGL rendering pass entirely so the hidden WebGL canvas does not waste
+  // GPU bandwidth drawing content that is never visible.
+  if (scene._webGPUReady && defined(scene._webGPURenderer)) {
+    return;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   const shadowMap = scene.shadowMap;
   if (defined(shadowMap) && shadowMap.enabled) {
@@ -4731,60 +4795,6 @@ function render(scene) {
   }
 
   context.endFrame();
-
-  // ── WebGPU overlay globe pass ─────────────────────────────────────────────
-  // If a WebGPU renderer is attached and ready, render the globe as a WebGPU
-  // draw on the sibling overlay canvas so the two canvases stay in sync.
-  if (scene._webGPUReady && defined(scene._webGPURenderer)) {
-    renderWebGPUGlobeFrame(scene);
-  }
-}
-
-/**
- * Extracts the current Cesium camera matrices and dispatches a WebGPU globe
- * render pass on the overlay canvas.
- *
- * The globe in the WGSL shader is a unit UV-sphere; we scale it by the WGS84
- * semi-major axis so the WebGPU globe coincides with Cesium's WebGL globe.
- *
- * @param {Scene} scene
- * @private
- */
-function renderWebGPUGlobeFrame(scene) {
-  const renderer = scene._webGPURenderer;
-  if (!renderer || !renderer.globePass || !renderer.globePass._ready) {
-    return;
-  }
-
-  const uniformState = scene.context.uniformState;
-
-  // Build Model = scale(EARTH_RADIUS) – the WGSL globe is a unit sphere.
-  Matrix4.fromUniformScale(_EARTH_RADIUS, _scratchScaleMat);
-
-  // MV  = view * model
-  Matrix4.multiply(uniformState.view, _scratchScaleMat, _scratchMVMat);
-
-  // MVP = projection * MV
-  Matrix4.multiply(uniformState.projection, _scratchMVMat, _scratchMVPMat);
-
-  // Pack uniforms into the scratch Float32Array.
-  // Layout matches GlobeUniforms in the WGSL shader:
-  //   mvp        : mat4x4<f32>  (offsets 0–15)
-  //   mv         : mat4x4<f32>  (offsets 16–31)
-  //   lightDirEC : vec3<f32>    (offsets 32–34)
-  //   time       : f32          (offset 35)
-  Matrix4.pack(_scratchMVPMat, _webGPUUniformBuf, 0);
-  Matrix4.pack(_scratchMVMat, _webGPUUniformBuf, 16);
-
-  const sun = uniformState.sunDirectionEC;
-  _webGPUUniformBuf[32] = sun.x;
-  _webGPUUniformBuf[33] = sun.y;
-  _webGPUUniformBuf[34] = sun.z;
-  _webGPUUniformBuf[35] = performance.now() * _MS_TO_SECONDS;
-
-  renderer.renderGlobePass({
-    uniformArray: _webGPUUniformBuf,
-  });
 }
 
 function tryAndCatchError(scene, functionToExecute) {
